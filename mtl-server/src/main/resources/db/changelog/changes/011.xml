@@ -577,8 +577,15 @@
         <sql>
             CREATE
             USER mtluserreadonly WITH PASSWORD 'MtlSuper123';
-            GRANT CONNECT
-            ON DATABASE mtl TO mtluserreadonly;
+        </sql>
+        <sql splitStatements="false">
+            DO $$
+            BEGIN
+                EXECUTE 'GRANT CONNECT ON DATABASE ' || current_database() || ' TO mtluserreadonly';
+            END
+            $$;
+        </sql>
+        <sql>
             GRANT USAGE ON SCHEMA
             public TO mtluserreadonly;
             GRANT
