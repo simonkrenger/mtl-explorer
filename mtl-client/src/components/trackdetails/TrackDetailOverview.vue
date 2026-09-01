@@ -4,71 +4,39 @@
     <div class="track-header">
       <div class="track-header__top">
         <span class="track-header__name">{{ trackDisplayName }}</span>
+      </div>
+      <div v-if="canDownloadTrackSource || gpsTrack.startDate" class="track-header__meta">
+        <span v-if="gpsTrack.startDate" class="track-header__date">
+          <i class="bi bi-calendar3"></i>
+          {{ formatDateAndTime(new Date(gpsTrack.startDate)) }}
+        </span>
         <div v-if="canDownloadTrackSource" class="track-header__actions">
           <button
             type="button"
             class="track-header__action-btn"
-            :disabled="activeDownload !== null"
+            :disabled="currentTrackDownloadKind !== null"
             aria-label="Download original"
             title="Download original indexed file"
             @click="downloadOriginal"
           >
-            <i :class="activeDownload === 'original' ? 'pi pi-spin pi-spinner' : 'bi bi-download'"></i>
+            <i :class="currentTrackDownloadKind === 'original' ? 'pi pi-spin pi-spinner' : 'bi bi-download'"></i>
           </button>
           <button
             v-if="canDownloadGpx"
             type="button"
             class="track-header__action-btn"
-            :disabled="activeDownload !== null"
+            :disabled="currentTrackDownloadKind !== null"
             aria-label="Download GPX"
             title="Download as GPX"
             @click="downloadGpx"
           >
-            <i :class="activeDownload === 'gpx' ? 'pi pi-spin pi-spinner' : 'bi bi-file-earmark-code'"></i>
+            <i :class="currentTrackDownloadKind === 'gpx' ? 'pi pi-spin pi-spinner' : 'bi bi-file-earmark-code'"></i>
           </button>
         </div>
-      </div>
-      <div class="track-header__meta">
-        <span v-if="gpsTrack.startDate">
-          <i class="bi bi-calendar3"></i>
-          {{ formatDateAndTime(new Date(gpsTrack.startDate)) }}
-        </span>
       </div>
       <div v-if="trackDescription" class="track-header__desc">
         <i class="bi bi-card-text"></i> {{ trackDescription }}
       </div>
-    </div>
-
-    <div class="section-label section-label--controls"><i class="bi bi-sliders"></i> Track Controls</div>
-    <div class="overview-control-panel" data-test="overview-track-controls">
-      <label class="overview-control">
-        <span class="overview-control__label">Activity Type</span>
-        <select
-          v-model="selectedActivityType"
-          class="overview-control__select"
-          :disabled="savingActivityType"
-          data-test="overview-activity-type-select"
-          @change="onActivityTypeSelect"
-        >
-          <option v-for="option in activityTypeOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-      </label>
-      <label class="overview-control">
-        <span class="overview-control__label">Statistics</span>
-        <select
-          v-model="selectedStatisticsExclusion"
-          class="overview-control__select"
-          :disabled="savingStatisticsExclusion"
-          data-test="overview-statistics-exclusion-select"
-          @change="onStatisticsExclusionSelect"
-        >
-          <option v-for="option in statisticsExclusionOptions" :key="option.value || 'included'" :value="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-      </label>
     </div>
 
     <!-- Loading skeleton -->
@@ -97,13 +65,13 @@
       </div>
       <div class="metric-tile metric-tile--primary">
         <i class="bi bi-arrow-up metric-tile__icon" style="color: var(--success)"></i>
-        <div class="metric-tile__value">{{ formatNumber(totalAscent, 0) }} m</div>
+        <div class="metric-tile__value">{{ formatElevation(totalAscent) }}</div>
         <div class="metric-tile__label">Ascent</div>
       </div>
       <div class="metric-tile metric-tile--primary">
         <i class="bi bi-speedometer2 metric-tile__icon"></i>
         <div class="metric-tile__value">
-          {{ formatNumber(avgSpeed, 1) }} <span class="metric-tile__unit">km/h</span>
+          {{ formatSpeed(avgSpeed, 1) }}
         </div>
         <div class="metric-tile__label">Avg Speed</div>
       </div>
@@ -157,21 +125,21 @@
         <div class="metric-tile">
           <i class="bi bi-speedometer metric-tile__icon metric-tile__icon--sm"></i>
           <div class="metric-tile__value metric-tile__value--sm">
-            {{ formatNumber(avgSpeed, 1) }} <span class="metric-tile__unit">km/h</span>
+            {{ formatSpeed(avgSpeed, 1) }}
           </div>
           <div class="metric-tile__label">Avg Speed</div>
         </div>
         <div v-if="movingAvgSpeed > 0" class="metric-tile">
           <i class="bi bi-speedometer2 metric-tile__icon metric-tile__icon--sm" style="color: var(--success)"></i>
           <div class="metric-tile__value metric-tile__value--sm">
-            {{ formatNumber(movingAvgSpeed, 1) }} <span class="metric-tile__unit">km/h</span>
+            {{ formatSpeed(movingAvgSpeed, 1) }}
           </div>
           <div class="metric-tile__label">Moving Avg</div>
         </div>
         <div v-if="maxSpeed > 0" class="metric-tile">
           <i class="bi bi-lightning metric-tile__icon metric-tile__icon--sm" style="color: var(--warning)"></i>
           <div class="metric-tile__value metric-tile__value--sm">
-            {{ formatNumber(maxSpeed, 1) }} <span class="metric-tile__unit">km/h</span>
+            {{ formatSpeed(maxSpeed, 1) }}
           </div>
           <div class="metric-tile__label">Max 30s Speed</div>
         </div>
@@ -182,39 +150,39 @@
       <div class="metrics-grid">
         <div class="metric-tile">
           <i class="bi bi-arrow-up metric-tile__icon metric-tile__icon--sm" style="color: var(--success)"></i>
-          <div class="metric-tile__value metric-tile__value--sm">{{ formatNumber(totalAscent, 0) }} m</div>
+          <div class="metric-tile__value metric-tile__value--sm">{{ formatElevation(totalAscent) }}</div>
           <div class="metric-tile__label">Ascent</div>
         </div>
         <div class="metric-tile">
           <i class="bi bi-arrow-down metric-tile__icon metric-tile__icon--sm" style="color: var(--warning)"></i>
-          <div class="metric-tile__value metric-tile__value--sm">{{ formatNumber(Math.abs(totalDescent), 0) }} m</div>
+          <div class="metric-tile__value metric-tile__value--sm">{{ formatElevation(Math.abs(totalDescent)) }}</div>
           <div class="metric-tile__label">Descent</div>
         </div>
         <div v-if="maxElevationGainRate > 0" class="metric-tile">
           <i class="bi bi-arrow-up-right metric-tile__icon metric-tile__icon--sm" style="color: var(--success)"></i>
           <div class="metric-tile__value metric-tile__value--sm">
-            {{ formatNumber(maxElevationGainRate, 0) }} <span class="metric-tile__unit">m/h</span>
+            {{ formatVerticalRate(maxElevationGainRate) }}
           </div>
           <div class="metric-tile__label">Max 30s Climb</div>
         </div>
         <div v-if="maxElevationLossRate > 0" class="metric-tile">
           <i class="bi bi-arrow-down-right metric-tile__icon metric-tile__icon--sm" style="color: var(--warning)"></i>
           <div class="metric-tile__value metric-tile__value--sm">
-            {{ formatNumber(maxElevationLossRate, 0) }} <span class="metric-tile__unit">m/h</span>
+            {{ formatVerticalRate(maxElevationLossRate) }}
           </div>
           <div class="metric-tile__label">Max 30s Desc.</div>
         </div>
         <div class="metric-tile">
-          <div class="metric-tile__value metric-tile__value--sm">{{ formatNumber(minAltitude, 0) }} m</div>
+          <div class="metric-tile__value metric-tile__value--sm">{{ formatElevation(minAltitude) }}</div>
           <div class="metric-tile__label">Min Alt.</div>
         </div>
         <div class="metric-tile">
-          <div class="metric-tile__value metric-tile__value--sm">{{ formatNumber(maxAltitude, 0) }} m</div>
+          <div class="metric-tile__value metric-tile__value--sm">{{ formatElevation(maxAltitude) }}</div>
           <div class="metric-tile__label">Max Alt.</div>
         </div>
         <div class="metric-tile">
           <div class="metric-tile__value metric-tile__value--sm">
-            {{ formatNumber(maxAltitude - minAltitude, 0) }} m
+            {{ formatElevation(maxAltitude - minAltitude) }}
           </div>
           <div class="metric-tile__label">Range</div>
         </div>
@@ -426,8 +394,7 @@
           </div>
           <div
             v-tooltip.top="{
-              value:
-                'Share of this track that was further than 25 m from any track recorded before it. Reflects exploration at the time of recording — tracks added later that cover the same area are not taken into account.',
+              value: `Share of this track that was further than ${formatDistance(EXPLORATION_CORRIDOR_WIDTH_M, 0)} from any track recorded before it. Reflects exploration at the time of recording — tracks added later that cover the same area are not taken into account.`,
               showDelay: 300,
             }"
             class="metric-tile__label"
@@ -453,7 +420,10 @@
             {{ formatDistanceSmart((1 - (gpsTrack.explorationScore ?? 0)) * (gpsTrack.trackLengthInMeter ?? 0)) }}
           </div>
           <div
-            v-tooltip.top="{ value: 'Distance on segments you have covered before (within 25 m)', showDelay: 300 }"
+            v-tooltip.top="{
+              value: `Distance on segments you have covered before (within ${formatDistance(EXPLORATION_CORRIDOR_WIDTH_M, 0)})`,
+              showDelay: 300,
+            }"
             class="metric-tile__label"
           >
             Known Distance
@@ -478,12 +448,16 @@
           <i class="bi bi-compass exploration-info-panel__icon"></i>
           <span
             >Compares this track to <strong>all your earlier tracks</strong>. A segment counts as <em>known</em> if
-            you've passed within <strong>25 m</strong> of it on a previous activity.</span
+            you've passed within <strong>{{ formatDistance(EXPLORATION_CORRIDOR_WIDTH_M, 0) }}</strong> of it on a
+            previous activity.</span
           >
         </div>
         <div class="exploration-info-panel__legend">
           <span class="exploration-legend-dot exploration-legend-dot--new"></span>
-          <span><strong>New Territory</strong> — ground never covered before (or not within 25 m)</span>
+          <span
+            ><strong>New Territory</strong> — ground never covered before (or not within
+            {{ formatDistance(EXPLORATION_CORRIDOR_WIDTH_M, 0) }})</span
+          >
         </div>
         <div class="exploration-info-panel__legend">
           <span class="exploration-legend-dot exploration-legend-dot--known"></span>
@@ -508,8 +482,8 @@
               readonly
               :value="trackIdText"
               aria-label="TrackID"
-              @focus="selectCopyField"
-              @click="selectCopyField"
+              @focus="selectInputText"
+              @click="selectInputText"
             />
             <button
               type="button"
@@ -584,7 +558,7 @@
             <span>Current rider</span>
             <strong>{{
               energyWhatIfResult?.baselineRiderWeightKg != null
-                ? `${formatNumber(energyWhatIfResult.baselineRiderWeightKg, 1)} kg`
+                ? formatMass(energyWhatIfResult.baselineRiderWeightKg, 1)
                 : '—'
             }}</strong>
           </div>
@@ -592,9 +566,9 @@
             <span>Model mass</span>
             <strong>{{
               energyWhatIfResult?.baselineWeightKgUsed != null
-                ? `${formatNumber(energyWhatIfResult.baselineWeightKgUsed, 1)} kg`
+                ? formatMass(energyWhatIfResult.baselineWeightKgUsed, 1)
                 : gpsTrack.energyWeightKgUsed != null
-                  ? `${formatNumber(gpsTrack.energyWeightKgUsed, 1)} kg`
+                  ? formatMass(gpsTrack.energyWeightKgUsed, 1)
                   : '—'
             }}</strong>
           </div>
@@ -603,7 +577,7 @@
         <div class="energy-adjust__field">
           <div class="energy-adjust__label-row">
             <label for="energy-rider-weight">Rider weight</label>
-            <span>{{ formatNumber(energyAdjustWeightKg, 1) }} kg</span>
+            <span>{{ formatMass(energyAdjustWeightKg, 1) }}</span>
           </div>
 
           <div class="energy-adjust__stepper">
@@ -612,18 +586,18 @@
               class="energy-adjust__step-btn"
               :disabled="energySaveLoading || energyAdjustWeightKg <= ENERGY_WEIGHT_MIN_KG"
               aria-label="Decrease rider weight"
-              @click="nudgeEnergyAdjustWeight(-ENERGY_WEIGHT_STEP_KG)"
+              @click="nudgeEnergyAdjustWeight(-ENERGY_WEIGHT_STEP_DISPLAY)"
             >
               <i class="bi bi-dash-lg"></i>
             </button>
             <div class="energy-adjust__input-wrap">
               <input
                 id="energy-rider-weight"
-                v-model.number="energyAdjustWeightKg"
+                v-model.number="energyAdjustWeightDisplay"
                 type="number"
-                :min="ENERGY_WEIGHT_MIN_KG"
-                :max="ENERGY_WEIGHT_MAX_KG"
-                :step="ENERGY_WEIGHT_STEP_KG"
+                :min="energyWeightMinDisplay"
+                :max="energyWeightMaxDisplay"
+                :step="ENERGY_WEIGHT_STEP_DISPLAY"
                 inputmode="decimal"
                 class="energy-adjust__input"
                 data-test="energy-rider-weight-input"
@@ -632,33 +606,33 @@
                 @change="commitEnergyAdjustWeight()"
                 @blur="commitEnergyAdjustWeight()"
               />
-              <span>kg</span>
+              <span>{{ energyWeightDisplayUnit }}</span>
             </div>
             <button
               type="button"
               class="energy-adjust__step-btn"
               :disabled="energySaveLoading || energyAdjustWeightKg >= ENERGY_WEIGHT_MAX_KG"
               aria-label="Increase rider weight"
-              @click="nudgeEnergyAdjustWeight(ENERGY_WEIGHT_STEP_KG)"
+              @click="nudgeEnergyAdjustWeight(ENERGY_WEIGHT_STEP_DISPLAY)"
             >
               <i class="bi bi-plus-lg"></i>
             </button>
           </div>
 
           <input
-            v-model.number="energyAdjustWeightKg"
+            v-model.number="energyAdjustWeightDisplay"
             type="range"
-            :min="ENERGY_WEIGHT_MIN_KG"
-            :max="ENERGY_WEIGHT_MAX_KG"
-            :step="ENERGY_WEIGHT_STEP_KG"
+            :min="energyWeightMinDisplay"
+            :max="energyWeightMaxDisplay"
+            :step="ENERGY_WEIGHT_STEP_DISPLAY"
             class="energy-adjust__range"
             aria-label="Rider weight"
             :disabled="energySaveLoading"
             @input="queueEnergyWhatIf"
           />
           <div class="energy-adjust__scale" aria-hidden="true">
-            <span>{{ ENERGY_WEIGHT_MIN_KG }} kg</span>
-            <span>{{ ENERGY_WEIGHT_MAX_KG }} kg</span>
+            <span>{{ formatMass(ENERGY_WEIGHT_MIN_KG, 0) }}</span>
+            <span>{{ formatMass(ENERGY_WEIGHT_MAX_KG, 0) }}</span>
           </div>
         </div>
 
@@ -727,33 +701,35 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, inject, onBeforeUnmount, ref, watch } from 'vue';
 import {
   formatDateAndTime,
   formatNumber,
   formatDistanceSmart,
+  formatDistance,
   formatDurationSmart,
   formatDistanceTooltip,
   formatDurationTooltip,
+  formatElevation,
+  formatMass,
+  formatSpeed,
+  formatVerticalRate,
+  metersPerSecondToKilometersPerHour,
 } from '@/utils/Utils';
 import type { ChartPoint } from '@/utils/chartSeriesAdapter';
 import ActivityTypeBadge from '@/components/ui/ActivityTypeBadge.vue';
-import {
-  GpsTrackActivityTypeEnum,
-  GpsTrackStatisticsExclusionReasonEnum,
-  type EnergyWhatIfResponse,
-  type GpsTrack,
-  type GpsTrackActivityTypeEnum as ActivityType,
-  type GpsTrackStatisticsExclusionReasonEnum as StatisticsExclusionReason,
-} from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
+import { type EnergyWhatIfResponse, type GpsTrack } from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
 import {
   calculateEnergyWhatIf,
   downloadTrackGpx as downloadTrackGpxFile,
   downloadTrackSourceFile,
   saveTrackEnergyRiderWeight,
-  updateTrackActivityType,
-  updateTrackStatisticsExclusion,
 } from '@/utils/ServiceHelper';
+import { useAsyncState } from '@/composables/useAsyncState';
+import { useMeasurementSystem } from '@/composables/useMeasurementSystem';
+import { massCanonicalValue, massDisplayValue, MEASUREMENT_DISPLAY_PROFILES } from '@/utils/units';
+import { selectInputText, writeTextToClipboard } from '@/utils/clipboard';
+import type { ToastService } from '@/types/ui';
 
 type TrackDetailInfoPopover = {
   toggle: (event: Event) => void;
@@ -765,48 +741,24 @@ type InfoSegment = {
 };
 type InfoContent = InfoSegment[][];
 type TrackDownloadKind = 'original' | 'gpx';
-type ToastService = {
-  add: (message: { severity: string; summary: string; detail?: string; life?: number }) => void;
+type ActiveTrackDownload = {
+  kind: TrackDownloadKind;
+  serial: number;
+  trackId: number;
 };
 
 const GPS_INDEX_NAME = 'GPS';
 const GPX_FILE_EXTENSION = '.gpx';
+const EXPLORATION_CORRIDOR_WIDTH_M = 25;
 const UNAVAILABLE_INDEXER_STATUSES = new Set(['REMOVED', 'EXCLUDED']);
 const COPY_STATUS_RESET_MS = 1800;
-const INCLUDED_STATISTICS_VALUE = '';
 const ENERGY_WEIGHT_DEFAULT_KG = 75;
 const ENERGY_WEIGHT_MIN_KG = 35;
 const ENERGY_WEIGHT_MAX_KG = 180;
-const ENERGY_WEIGHT_STEP_KG = 1;
+const ENERGY_WEIGHT_STEP_DISPLAY = 1;
 const ENERGY_PREVIEW_DEBOUNCE_MS = 250;
 const ENERGY_DELTA_CHANGED_EPSILON_WH = 0.05;
 const ENERGY_WEIGHT_CHANGED_EPSILON_KG = 0.05;
-const activityTypeOptions: Array<{ label: string; value: ActivityType }> = [
-  { label: 'Bicycle', value: GpsTrackActivityTypeEnum.Bicycle },
-  { label: 'Walking', value: GpsTrackActivityTypeEnum.Walking },
-  { label: 'Hiking', value: GpsTrackActivityTypeEnum.Hiking },
-  { label: 'Running', value: GpsTrackActivityTypeEnum.Running },
-  { label: 'Mountain biking', value: GpsTrackActivityTypeEnum.MountainBiking },
-  { label: 'Stand-up paddle', value: GpsTrackActivityTypeEnum.StandUpPaddle },
-  { label: 'Rowing', value: GpsTrackActivityTypeEnum.Rowing },
-  { label: 'Kayaking', value: GpsTrackActivityTypeEnum.Kayaking },
-  { label: 'Skiing', value: GpsTrackActivityTypeEnum.Skiing },
-  { label: 'Motorbiking', value: GpsTrackActivityTypeEnum.Motorbiking },
-  { label: 'Car', value: GpsTrackActivityTypeEnum.Car },
-  { label: 'Airplane', value: GpsTrackActivityTypeEnum.Airplane },
-  { label: 'Supersonic', value: GpsTrackActivityTypeEnum.SuperSonic },
-];
-const activityTypeValues = new Set<ActivityType>(Object.values(GpsTrackActivityTypeEnum));
-const statisticsExclusionOptions: Array<{ label: string; value: StatisticsExclusionReason | '' }> = [
-  { label: 'Included in statistics', value: INCLUDED_STATISTICS_VALUE },
-  { label: 'Exclude: GPS noise', value: GpsTrackStatisticsExclusionReasonEnum.GpsNoise },
-  { label: 'Exclude: wrong activity', value: GpsTrackStatisticsExclusionReasonEnum.WrongActivity },
-  { label: 'Exclude: import artifact', value: GpsTrackStatisticsExclusionReasonEnum.ImportArtifact },
-  { label: 'Exclude: other', value: GpsTrackStatisticsExclusionReasonEnum.Other },
-];
-const statisticsExclusionValues = new Set<StatisticsExclusionReason>(
-  Object.values(GpsTrackStatisticsExclusionReasonEnum)
-);
 
 defineOptions({
   name: 'TrackDetailOverview',
@@ -828,27 +780,35 @@ const emit = defineEmits<{
 
 const gpsTrack = computed(() => props.gpsTrack);
 const infoPopover = ref<TrackDetailInfoPopover | null>(null);
-const summaryReady = ref(false);
+const summaryReady = computed(() => gpsTrack.value != null);
 const activeTooltip = ref<string | null>(null);
 const currentInfoContent = ref<InfoContent>([]);
 const showExplorationInfo = ref(false);
-const activeDownload = ref<TrackDownloadKind | null>(null);
-const selectedActivityType = ref<ActivityType | ''>('');
-const selectedStatisticsExclusion = ref<StatisticsExclusionReason | ''>(INCLUDED_STATISTICS_VALUE);
-const savingActivityType = ref(false);
-const savingStatisticsExclusion = ref(false);
+const activeDownload = ref<ActiveTrackDownload | null>(null);
 const trackIdCopied = ref(false);
 const trackIdCopyError = ref('');
 const energyAdjustVisible = ref(false);
 const energyAdjustWeightKg = ref(ENERGY_WEIGHT_DEFAULT_KG);
-const energyWhatIfLoading = ref(false);
-const energyWhatIfError = ref('');
+const { measurementSystem } = useMeasurementSystem();
+const energyAdjustWeightDisplay = computed({
+  get: () => Number(massDisplayValue(energyAdjustWeightKg.value, measurementSystem.value).toFixed(1)),
+  set: (value: number) => {
+    energyAdjustWeightKg.value = clampEnergyWeight(massCanonicalValue(Number(value), measurementSystem.value));
+  },
+});
+const energyWeightDisplayUnit = computed(() => MEASUREMENT_DISPLAY_PROFILES[measurementSystem.value].mass);
+const energyWeightMinDisplay = computed(() =>
+  Number(massDisplayValue(ENERGY_WEIGHT_MIN_KG, measurementSystem.value).toFixed(1))
+);
+const energyWeightMaxDisplay = computed(() =>
+  Number(massDisplayValue(ENERGY_WEIGHT_MAX_KG, measurementSystem.value).toFixed(1))
+);
+const { loading: energyWhatIfLoading, error: energyWhatIfError } = useAsyncState('');
 const energyWhatIfResult = ref<EnergyWhatIfResponse | null>(null);
 const energySaveLoading = ref(false);
 const toast = inject<ToastService>('toast', { add: () => undefined });
 let trackIdCopyResetTimer: number | null = null;
-let activityTypeSaveSerial = 0;
-let statisticsExclusionSaveSerial = 0;
+let trackDownloadSerial = 0;
 let energyWhatIfSerial = 0;
 let energyPreviewDebounceTimer: ReturnType<typeof window.setTimeout> | null = null;
 
@@ -936,7 +896,7 @@ const avgSpeed = computed(() => {
   const dist = props.gpsTrack?.trackLengthInMeter;
   const seconds = trackDuration.value / 1000;
   if (dist != null && seconds > 0) {
-    return (dist / seconds) * 3.6;
+    return metersPerSecondToKilometersPerHour(dist / seconds);
   }
   return 0;
 });
@@ -973,6 +933,12 @@ const canDownloadTrackSource = computed(() => {
 
 const canDownloadGpx = computed(() => canDownloadTrackSource.value && !sourceFileIsGpx.value);
 
+const currentTrackDownloadKind = computed(() => {
+  const download = activeDownload.value;
+  if (download == null || download.trackId !== props.gpsTrack?.id) return null;
+  return download.kind;
+});
+
 const explorationIsCalculated = computed(
   () => props.gpsTrack?.explorationStatus === 'CALCULATED' && props.gpsTrack?.explorationScore != null
 );
@@ -985,7 +951,7 @@ const movingAvgSpeed = computed(() => {
   const dist = props.gpsTrack?.trackLengthInMeter;
   const secs = props.gpsTrack?.trackDurationInMotionSecs;
   if (dist != null && secs != null && secs > 0) {
-    return (dist / secs) * 3.6; // m/s -> km/h
+    return metersPerSecondToKilometersPerHour(dist / secs);
   }
   return 0;
 });
@@ -993,12 +959,6 @@ const movingAvgSpeed = computed(() => {
 const longestStopMs = computed(() => {
   const secs = props.gpsTrack?.trackLongestStopSecs;
   return secs != null ? secs * 1000 : 0;
-});
-
-onMounted(() => {
-  if (props.trackDetails.length > 0) {
-    computeSummary(props.trackDetails);
-  }
 });
 
 onBeforeUnmount(() => {
@@ -1010,19 +970,8 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => props.trackDetails,
-  (details) => {
-    if (details.length > 0) {
-      computeSummary(details);
-    }
-  }
-);
-
-watch(
-  () => [props.gpsTrack?.id, props.gpsTrack?.activityType, props.gpsTrack?.statisticsExclusionReason],
+  () => [props.gpsTrack?.id, props.gpsTrack?.activityType],
   () => {
-    selectedActivityType.value = props.gpsTrack?.activityType ?? '';
-    selectedStatisticsExclusion.value = props.gpsTrack?.statisticsExclusionReason ?? INCLUDED_STATISTICS_VALUE;
     energyAdjustWeightKg.value = ENERGY_WEIGHT_DEFAULT_KG;
     energyWhatIfResult.value = null;
     energyWhatIfError.value = '';
@@ -1067,8 +1016,8 @@ function commitEnergyAdjustWeight(queuePreview = true): void {
   if (queuePreview) queueEnergyWhatIf();
 }
 
-function nudgeEnergyAdjustWeight(deltaKg: number): void {
-  energyAdjustWeightKg.value = clampEnergyWeight(Number(energyAdjustWeightKg.value) + deltaKg);
+function nudgeEnergyAdjustWeight(deltaDisplay: number): void {
+  energyAdjustWeightDisplay.value = Number(energyAdjustWeightDisplay.value) + deltaDisplay;
   queueEnergyWhatIf();
 }
 
@@ -1130,7 +1079,7 @@ async function saveEnergyRiderWeight(): Promise<void> {
     toast.add({
       severity: 'success',
       summary: 'Energy saved',
-      detail: `This track now uses ${formatNumber(energyAdjustWeightKg.value, 1)} kg.`,
+      detail: `This track now uses ${formatMass(energyAdjustWeightKg.value, 1)}.`,
       life: 2500,
     });
   } catch (error) {
@@ -1203,48 +1152,11 @@ async function copyTrackId(): Promise<void> {
   }
 }
 
-async function writeTextToClipboard(text: string): Promise<void> {
-  let clipboardError: unknown = null;
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch (error) {
-      clipboardError = error;
-    }
-  }
-
-  try {
-    copyTextWithFallback(text);
-  } catch (fallbackError) {
-    throw clipboardError ?? fallbackError;
-  }
-}
-
-function selectCopyField(event: Event): void {
-  const target = event.target as HTMLInputElement | null;
-  target?.select?.();
-}
-
-function copyTextWithFallback(text: string): void {
-  const textArea = document.createElement('textarea');
-  textArea.value = text;
-  textArea.setAttribute('readonly', '');
-  textArea.style.position = 'fixed';
-  textArea.style.opacity = '0';
-  document.body.appendChild(textArea);
-  textArea.select();
-  const copied = document.execCommand('copy');
-  document.body.removeChild(textArea);
-  if (!copied) {
-    throw new Error('Browser copy command failed');
-  }
-}
-
 async function runTrackDownload(kind: TrackDownloadKind): Promise<void> {
   const trackId = props.gpsTrack?.id;
-  if (trackId == null || activeDownload.value !== null) return;
-  activeDownload.value = kind;
+  if (trackId == null || currentTrackDownloadKind.value !== null) return;
+  const serial = ++trackDownloadSerial;
+  activeDownload.value = { kind, serial, trackId };
   try {
     if (kind === 'original') {
       await downloadTrackSourceFile(trackId, sourceFileName.value);
@@ -1260,89 +1172,10 @@ async function runTrackDownload(kind: TrackDownloadKind): Promise<void> {
       life: 4000,
     });
   } finally {
-    activeDownload.value = null;
+    if (activeDownload.value?.serial === serial) {
+      activeDownload.value = null;
+    }
   }
-}
-
-async function onActivityTypeSelect(event: Event): Promise<void> {
-  const value = (event.target as HTMLSelectElement | null)?.value;
-  if (!value || !isActivityType(value)) {
-    selectedActivityType.value = props.gpsTrack?.activityType ?? '';
-    return;
-  }
-  await saveActivityType(value);
-}
-
-async function saveActivityType(activityType: ActivityType): Promise<void> {
-  const track = props.gpsTrack;
-  if (!track?.id || activityType === track.activityType) return;
-
-  const saveSerial = ++activityTypeSaveSerial;
-  savingActivityType.value = true;
-  try {
-    const savedTrack = await updateTrackActivityType(track.id, activityType);
-    if (saveSerial !== activityTypeSaveSerial) return;
-    emit('track-updated', savedTrack);
-    toast.add({ severity: 'success', summary: 'Activity type saved', life: 1800 });
-  } catch (error) {
-    if (saveSerial !== activityTypeSaveSerial) return;
-    console.warn('[track-details] failed to save activity type', { trackId: track.id, activityType, error });
-    selectedActivityType.value = track.activityType ?? '';
-    toast.add({
-      severity: 'error',
-      summary: 'Save failed',
-      detail: 'Could not update the activity type.',
-      life: 4000,
-    });
-  } finally {
-    if (saveSerial === activityTypeSaveSerial) savingActivityType.value = false;
-  }
-}
-
-async function onStatisticsExclusionSelect(event: Event): Promise<void> {
-  const value = (event.target as HTMLSelectElement | null)?.value ?? INCLUDED_STATISTICS_VALUE;
-  if (value !== INCLUDED_STATISTICS_VALUE && !isStatisticsExclusionReason(value)) {
-    selectedStatisticsExclusion.value = props.gpsTrack?.statisticsExclusionReason ?? INCLUDED_STATISTICS_VALUE;
-    return;
-  }
-  await saveStatisticsExclusion(value);
-}
-
-async function saveStatisticsExclusion(value: StatisticsExclusionReason | ''): Promise<void> {
-  const trackId = props.gpsTrack?.id;
-  if (trackId == null || value === (props.gpsTrack?.statisticsExclusionReason ?? INCLUDED_STATISTICS_VALUE)) return;
-
-  const saveSerial = ++statisticsExclusionSaveSerial;
-  savingStatisticsExclusion.value = true;
-  try {
-    const savedTrack = await updateTrackStatisticsExclusion(trackId, {
-      highlightExclusionReason: props.gpsTrack?.highlightExclusionReason,
-      statisticsExclusionReason: value || undefined,
-    });
-    if (saveSerial !== statisticsExclusionSaveSerial) return;
-    emit('track-updated', savedTrack);
-    toast.add({ severity: 'success', summary: 'Statistics curation saved', life: 1800 });
-  } catch (error) {
-    if (saveSerial !== statisticsExclusionSaveSerial) return;
-    console.warn('[track-details] failed to save statistics exclusion', { trackId, value, error });
-    selectedStatisticsExclusion.value = props.gpsTrack?.statisticsExclusionReason ?? INCLUDED_STATISTICS_VALUE;
-    toast.add({
-      severity: 'error',
-      summary: 'Save failed',
-      detail: 'Could not update statistics curation.',
-      life: 4000,
-    });
-  } finally {
-    if (saveSerial === statisticsExclusionSaveSerial) savingStatisticsExclusion.value = false;
-  }
-}
-
-function isActivityType(value: string): value is ActivityType {
-  return activityTypeValues.has(value as ActivityType);
-}
-
-function isStatisticsExclusionReason(value: string): value is StatisticsExclusionReason {
-  return statisticsExclusionValues.has(value as StatisticsExclusionReason);
 }
 
 function toggleTooltip(id: string) {
@@ -1352,11 +1185,6 @@ function toggleTooltip(id: string) {
 function showInfo(event: Event, content: InfoContent) {
   currentInfoContent.value = content;
   infoPopover.value?.toggle(event);
-}
-
-function computeSummary(details: ChartPoint[]) {
-  if (!details || details.length === 0) return;
-  summaryReady.value = true;
 }
 </script>
 
@@ -1378,17 +1206,14 @@ function computeSummary(details: ChartPoint[]) {
 }
 
 .track-header__top {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+  display: block;
 }
 
 .track-header__name {
+  display: block;
   font-size: var(--text-lg-size);
   font-weight: 700;
   color: var(--text-primary);
-  flex: 1 1 auto;
   line-height: var(--text-lg-lh);
   word-break: break-word;
 }
@@ -1397,16 +1222,17 @@ function computeSummary(details: ChartPoint[]) {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
+  margin-left: auto;
 }
 
-.track-header__action-btn {
+.track-header__action-btn,
+.info-copy-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 2rem;
   height: 2rem;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
   background: var(--surface-elevated);
   color: var(--text-secondary);
   cursor: pointer;
@@ -1414,6 +1240,10 @@ function computeSummary(details: ChartPoint[]) {
     background-color 0.15s ease,
     border-color 0.15s ease,
     color 0.15s ease;
+}
+
+.track-header__action-btn {
+  border-radius: 8px;
 }
 
 .track-header__action-btn:hover:not(:disabled) {
@@ -1434,15 +1264,23 @@ function computeSummary(details: ChartPoint[]) {
 
 .track-header__meta {
   display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
-  margin-top: 0.35rem;
+  align-items: center;
+  gap: 0.6rem;
+  justify-content: space-between;
+  margin-top: 0.45rem;
   font-size: var(--text-sm-size);
   color: var(--text-muted);
   flex-wrap: wrap;
 }
 
-.track-header__meta i {
+.track-header__date {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  line-height: var(--text-sm-lh);
+}
+
+.track-header__date i {
   font-size: var(--text-xs-size);
   margin-right: 0.25rem;
   opacity: 0.7;
@@ -1459,66 +1297,6 @@ function computeSummary(details: ChartPoint[]) {
 .track-header__desc i {
   opacity: 0.6;
   margin-right: 0.25rem;
-}
-
-/* ── Section Label ── */
-.section-label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: var(--text-2xs-size);
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  padding: 0.75rem 1rem 0.35rem;
-}
-
-.section-label i {
-  font-size: var(--text-xs-size);
-  opacity: 0.7;
-}
-
-.section-label--controls {
-  margin-top: 0.4rem;
-}
-
-.overview-control-panel {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-  gap: 0.6rem;
-  padding: 0 1rem 0.75rem;
-}
-
-.overview-control {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  min-width: 0;
-}
-
-.overview-control__label {
-  font-size: var(--text-xs-size);
-  line-height: var(--text-xs-lh);
-  color: var(--text-muted);
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.overview-control__select {
-  width: 100%;
-  min-height: 2.2rem;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--surface-elevated);
-  color: var(--text-primary);
-  font-size: var(--text-sm-size);
-  padding: 0.35rem 0.55rem;
-}
-
-.overview-control__select:disabled {
-  opacity: 0.65;
-  cursor: progress;
 }
 
 /* ── Primary Metrics ── */
@@ -1890,22 +1668,26 @@ function computeSummary(details: ChartPoint[]) {
   align-items: center;
 }
 
-.energy-adjust__step-btn {
+.energy-adjust__step-btn,
+.energy-adjust__action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.35rem;
-  height: 2.35rem;
   border: 1px solid var(--border-default);
   border-radius: 8px;
-  background: var(--surface-card);
-  color: var(--text-secondary);
   cursor: pointer;
   transition:
     background-color 0.15s ease,
     border-color 0.15s ease,
     color 0.15s ease,
     opacity 0.15s ease;
+}
+
+.energy-adjust__step-btn {
+  width: 2.35rem;
+  height: 2.35rem;
+  background: var(--surface-card);
+  color: var(--text-secondary);
 }
 
 .energy-adjust__step-btn:hover:not(:disabled),
@@ -2035,22 +1817,11 @@ function computeSummary(details: ChartPoint[]) {
 }
 
 .energy-adjust__action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   gap: 0.35rem;
   min-height: 2.35rem;
   padding: 0.4rem 0.85rem;
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
   font-size: var(--text-sm-size);
   font-weight: 700;
-  cursor: pointer;
-  transition:
-    background-color 0.15s ease,
-    border-color 0.15s ease,
-    color 0.15s ease,
-    opacity 0.15s ease;
 }
 
 .energy-adjust__action--secondary {
@@ -2061,7 +1832,7 @@ function computeSummary(details: ChartPoint[]) {
 .energy-adjust__action--primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: var(--accent-contrast, #fff);
+  color: var(--accent-contrast);
 }
 
 .energy-adjust__action:hover:not(:disabled),
@@ -2172,78 +1943,8 @@ function computeSummary(details: ChartPoint[]) {
   }
 }
 
-/* ── Info Drawer ── */
-.info-drawer {
-  margin: 0.5rem 0.5rem 0;
-  border-radius: 8px;
-  border: 1px solid var(--border-default);
-  overflow: hidden;
-}
-
-.info-drawer[open] .info-drawer__chevron {
-  transform: rotate(180deg);
-}
-
-.info-drawer__chevron {
-  transition: transform 0.2s ease;
-}
-
-.info-drawer__summary {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.6rem 0.9rem;
-  font-size: var(--text-xs-size);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
-  background: var(--surface-elevated);
-}
-
-.info-drawer__summary::-webkit-details-marker {
-  display: none;
-}
-
-.info-drawer__summary i:first-child {
-  font-size: var(--text-sm-size);
-}
-
-.info-drawer__summary .info-drawer__chevron {
-  margin-left: auto;
-  font-size: var(--text-xs-size);
-}
-
 .info-list {
-  display: flex;
-  flex-direction: column;
-  padding: 0.25rem 0;
   background: var(--surface-elevated);
-}
-
-.info-row {
-  display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
-  padding: 0.35rem 0.9rem;
-  font-size: var(--text-sm-size);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.info-key {
-  flex: 0 0 7rem;
-  color: var(--text-muted);
-  font-size: var(--text-xs-size);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.info-val {
-  color: var(--text-secondary);
-  word-break: break-word;
-  min-width: 0;
 }
 
 .info-val--copy {
@@ -2278,20 +1979,7 @@ function computeSummary(details: ChartPoint[]) {
 }
 
 .info-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  border: 1px solid var(--border-default);
   border-radius: 6px;
-  background: var(--surface-elevated);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition:
-    background-color 0.15s ease,
-    border-color 0.15s ease,
-    color 0.15s ease;
 }
 
 .info-copy-btn:hover:not(:disabled),
@@ -2319,12 +2007,6 @@ function computeSummary(details: ChartPoint[]) {
 .info-copy-error {
   color: var(--error);
   font-size: var(--text-xs-size);
-}
-
-.info-val--mono {
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
-  font-size: var(--text-xs-size);
-  opacity: 0.8;
 }
 
 /* ── Mobile ── */

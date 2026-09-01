@@ -1,10 +1,12 @@
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { nextTick } from 'vue';
 import { useMapStateStore } from '@/stores/mapStateStore';
 import { useMapSettingsStore } from '@/stores/mapSettingsStore';
 import { resolveConfiguredMapStyle } from '@/components/map/mapStyleResolver';
 import Map3DRenderer from '@/components/map/Map3DRenderer.vue';
+import { useMeasurementSystem } from '@/composables/useMeasurementSystem';
 
 const maplibreMock = vi.hoisted(() => {
   class MockLngLatBounds {
@@ -58,6 +60,7 @@ const maplibreMock = vi.hoisted(() => {
   }
 
   const instances: MockMap[] = [];
+  const scaleControls: Array<{ options: unknown; setUnit: ReturnType<typeof vi.fn> }> = [];
 
   const Map = vi.fn(function () {
     const map = new MockMap();
@@ -65,8 +68,15 @@ const maplibreMock = vi.hoisted(() => {
     return map;
   });
 
+  const ScaleControl = vi.fn(function (options: unknown) {
+    const control = { options, setUnit: vi.fn() };
+    scaleControls.push(control);
+    return control;
+  });
+
   return {
     instances,
+    scaleControls,
     Map,
     MockMap,
     LngLatBounds: MockLngLatBounds,
@@ -78,7 +88,7 @@ const maplibreMock = vi.hoisted(() => {
       })),
     },
     NavigationControl: vi.fn(),
-    ScaleControl: vi.fn(),
+    ScaleControl,
     AttributionControl: vi.fn(),
   };
 });
@@ -92,9 +102,7 @@ const replayControllerMock = vi.hoisted(() => ({
   instances: [] as Array<{ play: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }>,
 }));
 
-vi.mock('maplibre-gl', () => ({
-  default: maplibreMock,
-}));
+vi.mock('maplibre-gl', () => maplibreMock);
 
 vi.mock('@/components/replay/TrackReplayControls.vue', () => ({
   default: {
@@ -227,12 +235,17 @@ function flushPromises() {
 }
 
 describe('Map3DRenderer', () => {
+  const measurementPreference = useMeasurementSystem();
+
   beforeEach(() => {
     setActivePinia(createPinia());
     maplibreMock.instances.length = 0;
     maplibreMock.Map.mockClear();
+    maplibreMock.ScaleControl.mockClear();
+    maplibreMock.scaleControls.length = 0;
     vi.mocked(resolveConfiguredMapStyle).mockClear();
     replayControllerMock.instances.length = 0;
+    measurementPreference.setMeasurementSystem('METRIC');
     trackLoaderMock.fetchDetailTrackAtPrecision.mockResolvedValue({
       coordinates: [
         [8.5, 47.5, 450],
@@ -244,6 +257,7 @@ describe('Map3DRenderer', () => {
         trackDescription: 'Synthetic test track',
         activityType: 'HIKING',
         trackDurationInMotionSecs: 120,
+        maxAltitude: 1609.344,
       },
     });
     trackLoaderMock.loadCachedTrackCollection.mockResolvedValue({
@@ -311,5 +325,43 @@ describe('Map3DRenderer', () => {
     expect(wrapper.emitted('mode-close-requested')).toBeTruthy();
     expect(maplibreMock.Map).toHaveBeenCalledTimes(1);
     expect(maplibreMock.instances[0].remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes paused replay distance and elevation labels after a unit change', async () => {
+    const store = useMapStateStore();
+    store.enter3DReplay({ trackId: 7, trackLabel: 'Synthetic replay track' });
+
+    const wrapper = mount(Map3DRenderer, { attachTo: document.body });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get('[aria-label="3D replay telemetry"]').text()).toContain('1,609 m');
+    expect(wrapper.get('[data-test="track-replay-controls"]').attributes('distance-label')).toContain('km');
+
+    measurementPreference.setMeasurementSystem('US_CUSTOMARY');
+    await nextTick();
+
+    expect(wrapper.get('[aria-label="3D replay telemetry"]').text()).toContain('5,280 ft');
+    expect(wrapper.get('[data-test="track-replay-controls"]').attributes('distance-label')).toContain('ft');
+
+    wrapper.unmount();
+  });
+
+  it('uses the effective scale unit and updates it after a preference change', async () => {
+    const store = useMapStateStore();
+    store.enter3DReplay({ trackId: 7, trackLabel: 'Synthetic replay track' });
+
+    const wrapper = mount(Map3DRenderer, { attachTo: document.body });
+    await flushPromises();
+    await flushPromises();
+
+    expect(maplibreMock.ScaleControl).toHaveBeenCalledWith({ maxWidth: 100, unit: 'metric' });
+    expect(maplibreMock.scaleControls).toHaveLength(1);
+
+    measurementPreference.setMeasurementSystem('US_CUSTOMARY');
+    await nextTick();
+
+    expect(maplibreMock.scaleControls[0]?.setUnit).toHaveBeenCalledWith('imperial');
+    wrapper.unmount();
   });
 });

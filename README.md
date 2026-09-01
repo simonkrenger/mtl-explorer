@@ -1,6 +1,6 @@
 # MTL Explorer
 
-> Self-hosted GPS track and trail log for your own PC, home lab, or server.
+> Self-hosted GPS track and trail log for your own PC, NAS, home lab, or server.
 
 ## Start here
 
@@ -26,6 +26,14 @@ See the [feature overview](documentation/features.md) for the current capability
 [Why I built MTL Explorer](documentation/why-i-built-mtl-explorer.md): the project started
 from the need to see thousands of Garmin tracks on one map, then grew into a
 personal exploration, planning, and statistics tool.
+
+Note: MTL Explorer is a long-running personal project. This GitHub repository is
+a recently published public mirror; primary development happens in a private
+repository, so the public commit history may look younger than the project
+itself and may not include all intermediate steps. AI tools helped polish parts
+of the user experience, but MTL Explorer is not an automatically generated
+project. Even with the most advanced AI tools available today, that is not (yet?)
+possible.
 
 Repository layout:
 
@@ -70,21 +78,22 @@ see the [home install guide](documentation/home-install.md).
 
 ## Documentation
 
+- [Feature catalog](documentation/features.md) - current user-facing capabilities.
+- [Photo and media handling](documentation/photo-handling-improvement.md) - activity matching, map and timeline navigation, viewer, corrections, and media trends.
 - [Home install](documentation/home-install.md) - data folders, maps, updates,
   and logs.
 - [Container build](documentation/container-build.md) - build local Docker
   images from a source checkout.
 - [Legal documents](documentation/legal/README.md)
 - [Contributing](.github/CONTRIBUTING.md)
-- [Security policy](.github/SECURITY.md)
 
 ## License
 
 <details>
 <summary>License summary</summary>
 
-MTL Explorer is dual-licensed: AGPL for free personal/home use, with a
-commercial license available for proprietary or hosted use.
+MTL Explorer is available under AGPL-3.0-or-later, with a separate commercial
+license for users who do not want to comply with the AGPL terms.
 
 - [AGPL license](LICENSE)
 - [Commercial license](documentation/legal/COMMERCIAL-LICENSE.md)

@@ -1,13 +1,83 @@
 import { markRaw } from 'vue';
-import maplibregl from 'maplibre-gl';
+import * as maplibregl from 'maplibre-gl';
 import { GeoDrawingOverlay } from '@/layers/GeoDrawingOverlay';
 import { locationSearchTargetZoom as resolveLocationSearchTargetZoom } from '@/components/map/mapGeometry';
-import type { MapControllerMethodDefinitions, MapToolsMethods } from './mapControllerRuntime';
+import type { MapControllerMethodDefinitions, MapPoint, MapToolsMethods } from './mapControllerRuntime';
 
 const LOCATION_SEARCH_FLY_DURATION_MS = 900;
 const TRACK_DETAILS_MAP_DETENT = 'compact';
 const TRACK_DETAILS_DEFAULT_DETENT = 'default';
 const TRACK_DETAILS_EXPANDED_DETENT = 'expanded';
+const SWISS_MOBILITY_POPUP_HORIZONTAL_OFFSET_PX = 12;
+const SWISS_MOBILITY_POPUP_VERTICAL_OFFSET_PX = -10;
+const SWISS_MOBILITY_POPUP_EDGE_GAP_PX = 12;
+const SWISS_MOBILITY_POPUP_ESTIMATED_WIDTH_PX = 300;
+const SWISS_MOBILITY_POPUP_MIN_VISIBLE_HEIGHT_PX = 44;
+const TOOL_REF_NAMES = [
+  'infoTool',
+  'animateTool',
+  'measureTool',
+  'plannerTool',
+  'statistics',
+  'filterTool',
+  'mapSettingsTool',
+  'gpsLocate',
+  'adminTool',
+] as const;
+const TOOL_REF_BY_ID: Record<string, string> = {
+  animate: 'animateTool',
+  measure: 'measureTool',
+  planner: 'plannerTool',
+  stats: 'statistics',
+  filter: 'filterTool',
+  map: 'mapSettingsTool',
+  gps: 'gpsLocate',
+  admin: 'adminTool',
+};
+
+type SwissMobilityPopupViewport = {
+  width?: number;
+  height?: number;
+};
+
+function finitePositive(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+export function resolveSwissMobilityPopupPosition(
+  point: MapPoint,
+  viewport: SwissMobilityPopupViewport = {}
+): MapPoint {
+  const preferredX = point.x + SWISS_MOBILITY_POPUP_HORIZONTAL_OFFSET_PX;
+  const preferredY = point.y + SWISS_MOBILITY_POPUP_VERTICAL_OFFSET_PX;
+  const viewportWidth = finitePositive(viewport.width);
+  const viewportHeight = finitePositive(viewport.height);
+  const x =
+    viewportWidth === undefined
+      ? preferredX
+      : clamp(
+          preferredX,
+          SWISS_MOBILITY_POPUP_EDGE_GAP_PX,
+          Math.max(
+            SWISS_MOBILITY_POPUP_EDGE_GAP_PX,
+            viewportWidth - SWISS_MOBILITY_POPUP_ESTIMATED_WIDTH_PX - SWISS_MOBILITY_POPUP_EDGE_GAP_PX
+          )
+        );
+  const y =
+    viewportHeight === undefined
+      ? preferredY
+      : clamp(
+          preferredY,
+          SWISS_MOBILITY_POPUP_EDGE_GAP_PX,
+          Math.max(SWISS_MOBILITY_POPUP_EDGE_GAP_PX, viewportHeight - SWISS_MOBILITY_POPUP_MIN_VISIBLE_HEIGHT_PX)
+        );
+
+  return { x, y };
+}
 
 export function useMapTools(_deps: Record<string, never> = {}): MapControllerMethodDefinitions<MapToolsMethods> {
   const methods: MapControllerMethodDefinitions<MapToolsMethods> = {
@@ -30,7 +100,7 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
       this.locationSearchVisible = false;
       this.mapCenter = [lon, lat];
       this.setLocationSearchMarker(lon, lat);
-      const targetMap = this.overlayMap || this.map;
+      const targetMap = this.overlayMap;
       targetMap?.flyTo({
         center: [lon, lat],
         zoom: this.locationSearchTargetZoom(result),
@@ -149,18 +219,7 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
     },
 
     closeAllToolsExcept(skipRefName) {
-      const toolRefs = [
-        'infoTool',
-        'animateTool',
-        'measureTool',
-        'plannerTool',
-        'statistics',
-        'filterTool',
-        'mapSettingsTool',
-        'gpsLocate',
-        'adminTool',
-      ];
-      for (const name of toolRefs) {
+      for (const name of TOOL_REF_NAMES) {
         const ref = this.$refs[name];
         if (name !== skipRefName && ref?.close) {
           ref.close();
@@ -183,6 +242,7 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
         activityType: '',
       };
       if (hadTrackDetails) this.deselectTrack();
+      this.closeMediaSelection();
       this.mediaSheetVisible = false;
       this.closeMediaSheet();
       this.trackSelectionSheetVisible = false;
@@ -192,19 +252,37 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
       this.closeSwissMobilityPopup();
     },
 
+    captureActiveToolNavigation() {
+      const toolId = this.activeToolId;
+      const refName = toolId ? TOOL_REF_BY_ID[toolId] : undefined;
+      const toolRef = refName ? this.$refs[refName] : undefined;
+      this.trackDetailsReturnTarget = toolId
+        ? {
+            toolId,
+            state: toolRef?.getNavigationState?.(),
+          }
+        : null;
+    },
+
+    restoreToolNavigation(toolId) {
+      const target = this.trackDetailsReturnTarget;
+      if (!target) return;
+      if (target.toolId !== toolId) {
+        this.trackDetailsReturnTarget = null;
+        return;
+      }
+
+      const refName = TOOL_REF_BY_ID[toolId];
+      const toolRef = refName ? this.$refs[refName] : undefined;
+      this.$nextTick(() => {
+        toolRef?.restoreNavigationState?.(target.state);
+        this.trackDetailsReturnTarget = null;
+      });
+    },
+
     onToolSelect(toolId) {
       if (!toolId) return;
-      const toolMap: Record<string, string> = {
-        animate: 'animateTool',
-        measure: 'measureTool',
-        planner: 'plannerTool',
-        stats: 'statistics',
-        filter: 'filterTool',
-        map: 'mapSettingsTool',
-        gps: 'gpsLocate',
-        admin: 'adminTool',
-      };
-      const refName = toolMap[toolId];
+      const refName = TOOL_REF_BY_ID[toolId];
       if (!refName) return;
       this.closeTransientOverlaysForToolSwitch();
 
@@ -251,15 +329,34 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
       if (!toolId) {
         this.closeAllToolsExcept(null);
         this.activeToolId = null;
+        this.trackDetailsReturnTarget = null;
         return;
       }
-      if (this.activeToolId === toolId) return;
-      this.onToolSelect(toolId);
+      const refName = TOOL_REF_BY_ID[toolId];
+      if (!refName) return;
+      this._syncingToolRoute = true;
+      this.closeTransientOverlaysForToolSwitch();
+      this.closeAllToolsExcept(refName);
+      const ref = this.$refs[refName];
+      if (ref?.open) {
+        ref.open();
+      } else if (this.activeToolId !== toolId) {
+        ref?.toggle?.();
+      }
+      this.activeToolId = toolId === 'gps' ? null : toolId;
+      this.restoreToolNavigation(toolId);
+      this.$nextTick(() => {
+        this.activeToolId = toolId === 'gps' ? null : toolId;
+        this._syncingToolRoute = false;
+      });
     },
 
     syncTrackDetailRoute(trackId) {
       const normalizedTrackId = Number(trackId);
       if (trackId == null || !Number.isFinite(normalizedTrackId)) return;
+      if (!this.trackDetailsVisible && !this.trackDetailsReturnTarget) {
+        this.captureActiveToolNavigation();
+      }
       this.closeAllToolsExcept(null);
       this.activeToolId = null;
       if (
@@ -306,6 +403,7 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
     },
 
     onToolClosed() {
+      if (this._syncingToolRoute) return;
       this.activeToolId = null;
       // Clear geo shape overlays when filter sheet is closed (unless actively drawing)
       if (!this.geoDrawingParamDef && this.geoDrawingOverlay) {
@@ -389,10 +487,10 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
         });
         this.swissMobilityPopup = {
           visible: true,
-          pos: {
-            x: point.x + 12,
-            y: point.y - 10,
-          },
+          pos: resolveSwissMobilityPopupPosition(point, {
+            width: canvas.clientWidth || canvas.width,
+            height: canvas.clientHeight || canvas.height,
+          }),
           routes,
         };
       } catch {
@@ -403,23 +501,36 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
     showTrackSelectionPopup(point, trackIds) {
       this.closeSelectionPopup();
       this.selectionPopupTrackIds = trackIds;
+      this.selectionPopupMediaOptions = [];
+      this.trackSelectionPurpose = 'details';
       this.trackSelectionSheetVisible = true;
     },
 
     closeSelectionPopup() {
       this.trackSelectionSheetVisible = false;
       this.selectionPopupTrackIds = [];
+      this.selectionPopupMediaOptions = [];
+      this.trackSelectionPurpose = 'details';
     },
 
     onPopupTrackSelect(id) {
+      const purpose = this.trackSelectionPurpose;
+      const mediaOption = this.selectionPopupMediaOptions.find((option) => option.trackId === id);
       this.closeSelectionPopup();
+      if (purpose === 'photos' && (mediaOption?.matchedMediaCount ?? 0) > 0) {
+        this.onTrackBrowserOpenPhotos(id);
+        return;
+      }
       this.selectTrackById(id);
       this.openTrackDetails(id, TRACK_DETAILS_MAP_DETENT);
     },
 
-    openTrackDetails(trackId, initialDetent = TRACK_DETAILS_DEFAULT_DETENT) {
+    openTrackDetails(trackId, initialDetent = TRACK_DETAILS_DEFAULT_DETENT, initialTab = 'overview') {
       const normalizedTrackId = Number(trackId ?? this.selectedTrackId);
       if (!Number.isFinite(normalizedTrackId)) return;
+      if (!this.trackDetailsVisible && !this.trackDetailsReturnTarget) {
+        this.captureActiveToolNavigation();
+      }
       const feature = this.gpsTrackIdToFeature.get(normalizedTrackId) || this.selectedFeature;
       const p = feature?.properties;
       this.trackDetailsId = normalizedTrackId;
@@ -430,6 +541,7 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
         activityType: p?.activityType || '',
       };
       this.trackDetailsInitialDetent = initialDetent;
+      this.trackDetailsInitialTab = initialTab;
       this.trackDetailsVisible = true;
     },
 
@@ -445,6 +557,7 @@ export function useMapTools(_deps: Record<string, never> = {}): MapControllerMet
         activityType: '',
       };
       this.trackDetailsSelectedDetent = undefined;
+      this.trackDetailsInitialTab = 'overview';
       this.deselectTrack();
     },
 

@@ -1,6 +1,10 @@
-import { mount } from '@vue/test-utils';
+import { enableAutoUnmount, mount } from '@vue/test-utils';
 import { defineComponent, nextTick } from 'vue';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useMeasurementSystem } from '@/composables/useMeasurementSystem';
+
+const measurementPreference = useMeasurementSystem();
+enableAutoUnmount(afterEach);
 import StatisticsOverview from '@/components/statistics/StatisticsOverview.vue';
 import { fetchStatisticsOverview, updateTrackStatisticsExclusion } from '@/utils/ServiceHelper';
 import {
@@ -92,10 +96,12 @@ const flush = async () => {
 
 function overview(overrides: Partial<StatisticsOverviewResponseDto> = {}): StatisticsOverviewResponseDto {
   return {
+    measurementSystem: 'METRIC',
     summary: {
       trackCount: 2,
       distanceM: 125_000,
       durationMs: 28_800_000,
+      ascentM: 1500,
       energyWh: 1_800,
       oldestStart: new Date(2026, 0, 1, 10),
       newestStart: new Date(2026, 0, 3, 12),
@@ -154,9 +160,16 @@ function overview(overrides: Partial<StatisticsOverviewResponseDto> = {}): Stati
         ],
       },
     ],
+    firstActivity: { sortOrder: 10, rowKey: 'first-activity', trackId: 11, value: 0 },
+    latestActivity: { sortOrder: 20, rowKey: 'latest-activity', trackId: 12, value: 0 },
     milestones: [
-      { sortOrder: 10, rowKey: 'first-activity', trackId: 11, value: 0 },
-      { sortOrder: 60, rowKey: 'distance-100000', trackId: 11, value: 100_000 },
+      {
+        sortOrder: 4,
+        dimension: 'DISTANCE',
+        trackId: 11,
+        thresholdM: 100_000,
+        achievedM: 100_000,
+      },
     ],
     exclusionSummary: {
       highlightExcludedTrackCount: 0,
@@ -166,7 +179,12 @@ function overview(overrides: Partial<StatisticsOverviewResponseDto> = {}): Stati
   };
 }
 
-function mountOverview(toggle = vi.fn()) {
+function mountOverview(
+  toggle = vi.fn(),
+  indexedMediaCount: number | null = null,
+  indexedPhotoCount: number | null = null,
+  indexedVideoCount: number | null = null
+) {
   return mount(StatisticsOverview, {
     props: {
       tracks: [
@@ -198,9 +216,18 @@ function mountOverview(toggle = vi.fn()) {
       tracksCount: 99,
       unfilteredTotal: 4,
       filterRevision: 0,
+      indexedMediaCount,
+      indexedPhotoCount,
+      indexedVideoCount,
     },
     global: {
-      directives: { tooltip: {} },
+      directives: {
+        tooltip: {
+          mounted(element, binding) {
+            element.setAttribute('data-tooltip', binding.value.value);
+          },
+        },
+      },
       stubs: {
         ActivityTypeBadge: ActivityTypeBadgeStub,
         Popover: popoverStub(toggle),
@@ -214,6 +241,7 @@ function mountOverview(toggle = vi.fn()) {
 
 describe('StatisticsOverview', () => {
   beforeEach(() => {
+    measurementPreference.setMeasurementSystem('METRIC');
     fetchStatisticsOverviewMock.mockReset();
     updateTrackStatisticsExclusionMock.mockReset();
   });
@@ -226,9 +254,39 @@ describe('StatisticsOverview', () => {
 
     expect(fetchStatisticsOverviewMock).toHaveBeenCalledOnce();
     expect(wrapper.find('[data-test="summary-tracks"]').text()).toContain('2');
-    expect(wrapper.find('[data-test="filter-banner"]').text()).toContain('Showing 2 of 4 tracks');
+    expect(wrapper.find('[data-test="summary-ascent"]').text()).toContain('1,500 m');
+    const filterBanner = wrapper.get('[data-test="filter-banner"]');
+    expect(filterBanner.element.tagName).toBe('BUTTON');
+    expect(filterBanner.text()).toContain('Showing 2 of 4 tracks');
+    expect(filterBanner.attributes('aria-label')).toBe('Open Filter. Showing 2 of 4 tracks');
+    await filterBanner.trigger('click');
+    expect(wrapper.emitted('open-filter')).toEqual([[]]);
+    await filterBanner.trigger('keydown', { key: 'Enter' });
+    await filterBanner.trigger('keydown', { key: ' ' });
+    expect(wrapper.emitted('open-filter')).toEqual([[], [], []]);
     expect(wrapper.text()).toContain('Filtered century');
     expect(wrapper.text()).not.toContain('99');
+  });
+
+  it('shows one combined indexed-media count and opens Media trends', async () => {
+    fetchStatisticsOverviewMock.mockResolvedValueOnce(overview());
+
+    const wrapper = mountOverview(vi.fn(), 1_284, 1_200, 84);
+    await flush();
+
+    const mediaTile = wrapper.get('[data-test="summary-media"]');
+    expect(mediaTile.text()).toContain('1,284');
+    expect(mediaTile.text()).toContain('Media');
+    expect(mediaTile.text()).not.toContain('Photos');
+    expect(mediaTile.text()).not.toContain('Videos');
+    expect(mediaTile.attributes('aria-label')).toContain('1,284 indexed media items');
+    expect(mediaTile.attributes('data-tooltip')).toBe(
+      '1,200 photos and 84 videos are indexed. Activity filters do not apply.'
+    );
+
+    await mediaTile.trigger('click');
+
+    expect(wrapper.emitted('open-media')).toEqual([[]]);
   });
 
   it('does not refetch when map track metadata batches change', async () => {
@@ -256,6 +314,55 @@ describe('StatisticsOverview', () => {
 
     expect(fetchStatisticsOverviewMock).toHaveBeenCalledTimes(2);
     expect(wrapper.find('[data-test="summary-tracks"]').text()).toContain('1');
+  });
+
+  it('recovers from a load failure when the parent retries statistics', async () => {
+    fetchStatisticsOverviewMock.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(overview());
+
+    const wrapper = mountOverview();
+    await flush();
+
+    expect(wrapper.find('[data-test="overview-error"]').exists()).toBe(true);
+
+    await wrapper.setProps({ retryRevision: 1 });
+    await flush();
+
+    expect(fetchStatisticsOverviewMock).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('[data-test="overview-error"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="summary-tracks"]').text()).toContain('2');
+  });
+
+  it('refetches semantic milestones when the measurement system changes', async () => {
+    fetchStatisticsOverviewMock.mockResolvedValueOnce(overview()).mockResolvedValueOnce(
+      overview({
+        measurementSystem: 'US_CUSTOMARY',
+        milestones: [
+          {
+            sortOrder: 5,
+            dimension: 'DISTANCE',
+            trackId: 12,
+            thresholdM: 160_934.4,
+            achievedM: 170_000,
+          },
+        ],
+      })
+    );
+
+    const wrapper = mountOverview();
+    await flush();
+
+    expect(fetchStatisticsOverviewMock).toHaveBeenLastCalledWith('METRIC', expect.any(AbortSignal), undefined);
+    expect(wrapper.text()).toContain('First 100 km track');
+
+    measurementPreference.setMeasurementSystem('US_CUSTOMARY');
+    await flush();
+
+    expect(fetchStatisticsOverviewMock).toHaveBeenLastCalledWith('US_CUSTOMARY', expect.any(AbortSignal), undefined);
+    expect(wrapper.text()).toContain('First 100 mi track');
+    expect(wrapper.text()).toContain('Filtered latest');
+
+    wrapper.unmount();
+    measurementPreference.setMeasurementSystem('METRIC');
   });
 
   it('toggles activity breakdown metrics and hides energy when the server summary has no energy', async () => {
@@ -355,6 +462,14 @@ describe('StatisticsOverview', () => {
     });
     expect(fetchStatisticsOverviewMock).toHaveBeenCalledTimes(2);
     expect(wrapper.find('[data-test="highlight-exclusion-note"]').text()).toBe('1 track excluded');
+    expect(wrapper.emitted('track-updated')).toEqual([
+      [
+        expect.objectContaining({
+          id: 11,
+          highlightExclusionReason: ExclusionReasonEnum.GpsNoise,
+        }),
+      ],
+    ]);
 
     await wrapper.find('[data-test="highlight-longest-distance-main"]').trigger('click');
     await nextTick();

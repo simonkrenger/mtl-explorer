@@ -1,9 +1,10 @@
-import maplibregl from 'maplibre-gl';
+import * as maplibregl from 'maplibre-gl';
 import { TERRAIN_DEM_SOURCE_ID } from '@/utils/mapStyle';
 import { TRACK_COLOR, TRACK_SELECTED_COLOR } from '@/utils/trackColors';
 import { sampleReplayPath, type ReplayPath, type ReplayPathPoint } from '@/components/replay/trackReplayPath';
 import { shouldReplaceElevationRefreshTimer } from '@/components/map/terrainElevationScheduler';
 import { normalizeLongitude, shortestLongitudeDelta, unwrapLngLatCoordinates } from '@/components/map/mapGeometry';
+import { interpolateNullableNumber as interpolateNullable } from '@/utils/numbers';
 
 export const TRACK_REPLAY_LAYER_ID = 'track-replay-layer';
 
@@ -121,10 +122,14 @@ export class TrackReplayLayer implements maplibregl.CustomLayerInterface {
   private readonly playheadBorderColor: NormalizedColor = [1, 1, 1, 0.95];
   private readonly playheadOutlineColor: NormalizedColor = [0.96, 0.62, 0.04, 0.95];
 
-  private readonly onTerrainData = (event?: { sourceId?: string }) => {
-    if (!event?.sourceId || event.sourceId === TERRAIN_DEM_SOURCE_ID) {
+  private readonly onTerrainSourceData = (event: maplibregl.MapSourceDataEvent) => {
+    if (event.sourceId === TERRAIN_DEM_SOURCE_ID) {
       this.scheduleElevationRefresh();
     }
+  };
+
+  private readonly onTerrainChange = (_event: maplibregl.MapTerrainEvent) => {
+    this.scheduleElevationRefresh();
   };
 
   private readonly onMoveEnd = () => {
@@ -148,8 +153,8 @@ export class TrackReplayLayer implements maplibregl.CustomLayerInterface {
     this.playheadBuffer = gl.createBuffer();
     this.uploadBuffers();
 
-    map.on('sourcedata', this.onTerrainData);
-    map.on('terrain', this.onTerrainData);
+    map.on('sourcedata', this.onTerrainSourceData);
+    map.on('terrain', this.onTerrainChange);
     map.on('move', this.onMove);
     map.on('moveend', this.onMoveEnd);
     this.scheduleElevationRefresh(0);
@@ -158,8 +163,8 @@ export class TrackReplayLayer implements maplibregl.CustomLayerInterface {
   onRemove(map: maplibregl.Map, gl: WebGLRenderingContext | WebGL2RenderingContext): void {
     this.elevationRefreshGeneration += 1;
     this.clearElevationRefreshTimer();
-    map.off('sourcedata', this.onTerrainData);
-    map.off('terrain', this.onTerrainData);
+    map.off('sourcedata', this.onTerrainSourceData);
+    map.off('terrain', this.onTerrainChange);
     map.off('move', this.onMove);
     map.off('moveend', this.onMoveEnd);
     if (this.fullBuffer) gl.deleteBuffer(this.fullBuffer);
@@ -615,13 +620,6 @@ function coordinateCacheKey(lng: number, lat: number): string {
   return `${lng.toFixed(TERRAIN_CACHE_COORDINATE_PRECISION)},${lat.toFixed(TERRAIN_CACHE_COORDINATE_PRECISION)}`;
 }
 
-function interpolateNullable(a: number | null, b: number | null, t: number): number | null {
-  if (a == null && b == null) return null;
-  if (a == null) return b;
-  if (b == null) return a;
-  return interpolateNumber(a, b, t);
-}
-
 function interpolateNumber(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
@@ -767,18 +765,7 @@ void main() {
 `
   );
 
-  const program = gl.createProgram();
-  if (!program) throw new Error('Unable to create track replay WebGL program');
-  gl.attachShader(program, vertexShader);
-  gl.attachShader(program, fragmentShader);
-  gl.linkProgram(program);
-  gl.deleteShader(vertexShader);
-  gl.deleteShader(fragmentShader);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const message = gl.getProgramInfoLog(program) ?? 'unknown program link error';
-    gl.deleteProgram(program);
-    throw new Error(`Unable to link track replay WebGL program: ${message}`);
-  }
+  const program = linkProgram(gl, vertexShader, fragmentShader, 'track replay');
 
   return {
     program,
@@ -808,6 +795,27 @@ function compileShader(gl: WebGLRenderingContext | WebGL2RenderingContext, type:
     throw new Error(`Unable to compile track replay WebGL shader: ${message}`);
   }
   return shader;
+}
+
+function linkProgram(
+  gl: WebGLRenderingContext | WebGL2RenderingContext,
+  vertexShader: WebGLShader,
+  fragmentShader: WebGLShader,
+  label: string
+): WebGLProgram {
+  const program = gl.createProgram();
+  if (!program) throw new Error(`Unable to create ${label} WebGL program`);
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  gl.deleteShader(vertexShader);
+  gl.deleteShader(fragmentShader);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const message = gl.getProgramInfoLog(program) ?? 'unknown program link error';
+    gl.deleteProgram(program);
+    throw new Error(`Unable to link ${label} WebGL program: ${message}`);
+  }
+  return program;
 }
 
 function createPointProgram(gl: WebGLRenderingContext | WebGL2RenderingContext): ReplayPointProgram {
@@ -861,18 +869,7 @@ void main() {
 `
   );
 
-  const program = gl.createProgram();
-  if (!program) throw new Error('Unable to create track replay playhead WebGL program');
-  gl.attachShader(program, vertexShader);
-  gl.attachShader(program, fragmentShader);
-  gl.linkProgram(program);
-  gl.deleteShader(vertexShader);
-  gl.deleteShader(fragmentShader);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const message = gl.getProgramInfoLog(program) ?? 'unknown program link error';
-    gl.deleteProgram(program);
-    throw new Error(`Unable to link track replay playhead WebGL program: ${message}`);
-  }
+  const program = linkProgram(gl, vertexShader, fragmentShader, 'track replay playhead');
 
   return {
     program,

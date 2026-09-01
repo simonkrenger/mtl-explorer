@@ -1,4 +1,4 @@
-import { DEFAULT_LAYER_OPACITIES, DEFAULT_MAP_THEME } from '@/stores/mapSettingsStore';
+import { DEFAULT_LAYER_OPACITIES } from '@/stores/mapSettingsStore';
 import { MAP_OVERLAYS } from '@/utils/mapStyle';
 import { isRemoteRasterMapTheme } from '@/components/map/mapStyleResolver';
 import { TRACK_COLOR } from '@/utils/trackColors';
@@ -9,7 +9,13 @@ import {
   gradientBucketCount,
   shouldUseCompactGradientLegend,
 } from '@/utils/filterMetadata';
-import type { MapControllerMethodDefinitions, MapLayerSettingsMethods } from './mapControllerRuntime';
+import type {
+  MapControllerMethodDefinitions,
+  MapControllerRuntime,
+  MapLayerSettingsMethods,
+  MapOverlay,
+  TrackLineColor,
+} from './mapControllerRuntime';
 import type { useFilterStore } from '@/stores/filterStore';
 import type { MapLayerId, useMapSettingsStore } from '@/stores/mapSettingsStore';
 
@@ -24,12 +30,105 @@ const TRACK_OPACITY_PAINT_PROPERTIES = [
   ['tracks-highlight-circle-layer', 'circle-opacity'],
 ] as const;
 
+const DISABLED_BASEMAP_OPACITY = 0.08;
+const BASEMAP_OPACITY_PROPERTIES = {
+  background: ['background-opacity'],
+  fill: ['fill-opacity'],
+  line: ['line-opacity'],
+  symbol: ['icon-opacity', 'text-opacity'],
+  raster: ['raster-opacity'],
+  circle: ['circle-opacity', 'circle-stroke-opacity'],
+  'fill-extrusion': ['fill-extrusion-opacity'],
+  heatmap: ['heatmap-opacity'],
+} as const;
+
+type BasemapLayerType = keyof typeof BASEMAP_OPACITY_PROPERTIES;
+type BasemapPaintProperty = (typeof BASEMAP_OPACITY_PROPERTIES)[BasemapLayerType][number];
+type BasemapPaintState = {
+  layerId: string;
+  properties: Array<{ name: BasemapPaintProperty; value: unknown }>;
+};
+type MapPaintApi = {
+  getPaintProperty(layerId: string, propertyName: string): unknown;
+  setPaintProperty(layerId: string, propertyName: string, value: unknown): void;
+};
+
+export function basemapOpacityFactor(enabled: boolean, sliderValue: number): number {
+  if (!enabled) return DISABLED_BASEMAP_OPACITY;
+  return Math.max(0, Math.min(1, sliderValue / 100));
+}
+
+export function scaledOpacityValue(value: unknown, factor: number): unknown {
+  if (typeof value === 'number') return value * factor;
+  if (Array.isArray(value)) {
+    if (factor === 1) return value;
+    if (value[0] === 'interpolate' && Array.isArray(value[2]) && value[2][0] === 'zoom') {
+      return value.map((part, index) => {
+        const isOutput = index >= 4 && index % 2 === 0;
+        return isOutput ? scaledOpacityValue(part, factor) : part;
+      });
+    }
+    if (value[0] === 'step' && Array.isArray(value[1]) && value[1][0] === 'zoom') {
+      return value.map((part, index) => {
+        const isOutput = index === 2 || (index >= 4 && index % 2 === 0);
+        return isOutput ? scaledOpacityValue(part, factor) : part;
+      });
+    }
+    return ['*', value, factor];
+  }
+  return factor;
+}
+
+async function rebuildMapLayers(runtime: MapControllerRuntime): Promise<void> {
+  runtime.showLoader = true;
+  try {
+    await runtime.initMap();
+    await runtime.addTracksToMap();
+  } finally {
+    runtime.showLoader = false;
+  }
+}
+
 export function useMapLayerSettings(deps: {
   filterStore: ReturnType<typeof useFilterStore>;
   mapSettingsStore: ReturnType<typeof useMapSettingsStore>;
 }): MapControllerMethodDefinitions<MapLayerSettingsMethods> {
   const { filterStore, mapSettingsStore } = deps;
+  let basemapPaintStates: BasemapPaintState[] = [];
   const methods: MapControllerMethodDefinitions<MapLayerSettingsMethods> = {
+    captureBasemapLayers() {
+      if (!this.overlayMap) {
+        basemapPaintStates = [];
+        return;
+      }
+      const paintMap = this.overlayMap as unknown as MapPaintApi;
+      basemapPaintStates = (this.overlayMap.getStyle().layers ?? []).flatMap((layer) => {
+        const propertyNames = BASEMAP_OPACITY_PROPERTIES[layer.type as BasemapLayerType];
+        if (!propertyNames) return [];
+        return [
+          {
+            layerId: layer.id,
+            properties: propertyNames.map((name) => ({
+              name,
+              value: paintMap.getPaintProperty(layer.id, name),
+            })),
+          },
+        ];
+      });
+    },
+
+    applyBasemapAppearance() {
+      if (!this.overlayMap) return;
+      const paintMap = this.overlayMap as unknown as MapPaintApi;
+      const factor = basemapOpacityFactor(this.basemapEnabled, this.layerOpacities.basemap);
+      for (const layer of basemapPaintStates) {
+        if (!this.overlayMap.getLayer(layer.layerId)) continue;
+        for (const property of layer.properties) {
+          paintMap.setPaintProperty(layer.layerId, property.name, scaledOpacityValue(property.value, factor));
+        }
+      }
+    },
+
     async resolveTrackLineColor() {
       const clientFilterConfig = await filterStore.ensureLoaded();
       const palette = clientFilterConfig?.palette;
@@ -37,7 +136,6 @@ export function useMapLayerSettings(deps: {
       const filterConfig = filterInfo?.filterConfig;
       const legendSortStrategy = clientFilterConfig?.legendSortStrategy;
       const hasPalette = Boolean(palette && !palette.isEmptyColorPalette());
-      palette?.reset();
       if (!hasPalette) {
         this.filterActive = filterStore.isActive;
         this.legendEntries = [];
@@ -61,6 +159,16 @@ export function useMapLayerSettings(deps: {
         group,
         count,
       }));
+      const stableGroups = (
+        (this.activeTrackFilterResult as { availableGroups?: Array<{ key?: string | null }> } | null | undefined)
+          ?.availableGroups ?? []
+      )
+        .map((group) => group.key)
+        .filter((group): group is string => typeof group === 'string')
+        .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+      for (const group of stableGroups) {
+        colorForFilterGroup(palette, group, filterInfo);
+      }
       const sortedEntries = legendSortStrategy
         ? legendEntries.sort((a, b) => compareLegendEntries(a, b, filterConfig, legendSortStrategy))
         : this.orderLegendEntriesByFilterResult(
@@ -84,7 +192,7 @@ export function useMapLayerSettings(deps: {
         matchExpr.push(group, color);
       }
       matchExpr.push(TRACK_COLOR);
-      return matchExpr;
+      return matchExpr as TrackLineColor;
     },
 
     async updateTrackStyle() {
@@ -161,40 +269,42 @@ export function useMapLayerSettings(deps: {
       return undefined;
     },
 
-    /** Add all currently-active overlay layers to the overlay map. */
+    _addOverlay(overlay: MapOverlay, opacity: number, beforeId?: string) {
+      if (!this.overlayMap) return;
+      if (!this.overlayMap.getSource(overlay.id)) {
+        this.overlayMap.addSource(overlay.id, {
+          type: 'raster',
+          tiles: [overlay.url],
+          tileSize: 256,
+          attribution: overlay.attribution,
+        });
+      }
+      if (!this.overlayMap.getLayer(`${overlay.id}-overlay`)) {
+        this.overlayMap.addLayer(
+          {
+            id: `${overlay.id}-overlay`,
+            type: 'raster',
+            source: overlay.id,
+            minzoom: 0,
+            maxzoom: 22,
+            paint: this._overlayPaintForSlider(opacity, (overlay as MapOverlay & { hueRotate?: number }).hueRotate),
+          },
+          beforeId
+        );
+      }
+    },
+
+    /** Add all currently active route overlays. */
     applyActiveOverlays() {
       if (!this.overlayMap) return;
       const beforeId = this._overlayBeforeId();
       for (const overlay of MAP_OVERLAYS) {
         if (!this.activeOverlays.includes(overlay.id)) continue;
-        if (!this.overlayMap.getSource(overlay.id)) {
-          this.overlayMap.addSource(overlay.id, {
-            type: 'raster',
-            tiles: [overlay.url],
-            tileSize: 256,
-            attribution: overlay.attribution,
-          });
-        }
-        if (!this.overlayMap.getLayer(`${overlay.id}-overlay`)) {
-          this.overlayMap.addLayer(
-            {
-              id: `${overlay.id}-overlay`,
-              type: 'raster',
-              source: overlay.id,
-              minzoom: 0,
-              maxzoom: 22,
-              paint: this._overlayPaintForSlider(
-                this.layerOpacities[overlay.id] ?? 100,
-                (overlay as typeof overlay & { hueRotate?: number }).hueRotate
-              ),
-            },
-            beforeId
-          );
-        }
+        this._addOverlay(overlay, this.layerOpacities[overlay.id] ?? 100, beforeId);
       }
     },
 
-    /** Remove all overlay layers and sources from the overlay map. */
+    /** Remove all route overlay layers and sources. */
     removeAllOverlays() {
       if (!this.overlayMap) return;
       for (const overlay of MAP_OVERLAYS) {
@@ -210,13 +320,8 @@ export function useMapLayerSettings(deps: {
       this.removeAllOverlays();
       mapSettingsStore.reset();
       this.syncMapSettingsFromStore();
-      this.showLoader = true;
-      try {
-        await this.initMap();
-        await this.addTracksToMap();
-      } finally {
-        this.showLoader = false;
-      }
+      this.baseMapRuntimeFallbackApplied = false;
+      await rebuildMapLayers(this);
     },
 
     /** Copy the Pinia-backed map settings into the controller's MapLibre runtime state. */
@@ -287,8 +392,7 @@ export function useMapLayerSettings(deps: {
       const opacity = this.layerOpacities[layerId] / 100;
       switch (layerId) {
         case 'basemap':
-          // CSS filter handles visual dimming via `baseMapStyle` computed.
-          // Hillshade also depends on basemap dim → update it.
+          this.applyBasemapAppearance();
           this._applyHillshade();
           break;
         case 'terrain':
@@ -336,7 +440,7 @@ export function useMapLayerSettings(deps: {
               this.layerOpacities[layerId],
               (overlay as (typeof overlay & { hueRotate?: number }) | undefined)?.hueRotate
             );
-            for (const [prop, val] of Object.entries(paint)) {
+            for (const [prop, val] of Object.entries(paint) as Array<[keyof typeof paint, number]>) {
               this.overlayMap.setPaintProperty(layerName, prop, val);
             }
           }
@@ -358,30 +462,7 @@ export function useMapLayerSettings(deps: {
       if (idx === -1) {
         const overlay = MAP_OVERLAYS.find((o) => o.id === overlayId);
         if (overlay && this.overlayMap) {
-          if (!this.overlayMap.getSource(overlay.id)) {
-            this.overlayMap.addSource(overlay.id, {
-              type: 'raster',
-              tiles: [overlay.url],
-              tileSize: 256,
-              attribution: overlay.attribution,
-            });
-          }
-          if (!this.overlayMap.getLayer(`${overlay.id}-overlay`)) {
-            this.overlayMap.addLayer(
-              {
-                id: `${overlay.id}-overlay`,
-                type: 'raster',
-                source: overlay.id,
-                minzoom: 0,
-                maxzoom: 22,
-                paint: this._overlayPaintForSlider(
-                  this.layerOpacities[overlayId],
-                  (overlay as typeof overlay & { hueRotate?: number }).hueRotate
-                ),
-              },
-              this._overlayBeforeId()
-            );
-          }
+          this._addOverlay(overlay, this.layerOpacities[overlayId], this._overlayBeforeId());
         }
         mapSettingsStore.setLayerEnabled(overlayId as MapLayerId, true);
       } else {
@@ -400,29 +481,16 @@ export function useMapLayerSettings(deps: {
         mapSettingsStore.setTheme(themeCode);
         this.syncMapSettingsFromStore();
       }
-      this.showLoader = true;
-      try {
-        await this.initMap();
-        await this.addTracksToMap();
-      } finally {
-        this.showLoader = false;
-      }
+      this.baseMapRuntimeFallbackApplied = false;
+      await rebuildMapLayers(this);
     },
 
     async onMapSourceModeChangeEvent(sourceMode) {
       const nextMode = sourceMode === 'remote' ? 'remote' : 'auto';
       mapSettingsStore.setMapSourceMode(nextMode);
-      if (nextMode === 'remote' && !isRemoteRasterMapTheme(mapSettingsStore.theme)) {
-        mapSettingsStore.setTheme(DEFAULT_MAP_THEME);
-      }
       this.syncMapSettingsFromStore();
-      this.showLoader = true;
-      try {
-        await this.initMap();
-        await this.addTracksToMap();
-      } finally {
-        this.showLoader = false;
-      }
+      this.baseMapRuntimeFallbackApplied = false;
+      await rebuildMapLayers(this);
     },
 
     onToggleTrackPoints() {

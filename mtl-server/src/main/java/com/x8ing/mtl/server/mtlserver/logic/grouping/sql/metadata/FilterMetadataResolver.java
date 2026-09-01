@@ -1,9 +1,9 @@
 package com.x8ing.mtl.server.mtlserver.logic.grouping.sql.metadata;
 
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 import com.x8ing.mtl.server.mtlserver.db.entity.config.FilterConfigEntity;
 import com.x8ing.mtl.server.mtlserver.logic.grouping.sql.template.FilterTemplateGraphResolver;
 import com.x8ing.mtl.server.mtlserver.web.services.track.entity.metadata.FilterEffectiveUiMetadata;
@@ -11,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.function.Consumer;
 
 @Component
 @Slf4j
@@ -68,15 +69,7 @@ public class FilterMetadataResolver {
     }
 
     private void mergeObjectMembers(ObjectNode target, JsonNode source, FilterConfigEntity filter, String fieldName) {
-        if (source == null || source.isMissingNode() || source.isNull()) {
-            return;
-        }
-        if (!source.isObject()) {
-            log.warn("Ignoring UI metadata {} for filter {} because it is not an object", fieldName, FilterTemplateGraphResolver.templatePathFor(filter));
-            return;
-        }
-
-        source.fields().forEachRemaining(entry -> {
+        forEachObjectMetadata(source, filter, fieldName, entry -> {
             JsonNode value = entry.getValue();
             if (!value.isObject()) {
                 log.warn(
@@ -87,25 +80,15 @@ public class FilterMetadataResolver {
                 return;
             }
 
-            ObjectNode mergedValue = target.has(entry.getKey()) && target.get(entry.getKey()).isObject()
-                    ? ((ObjectNode) target.get(entry.getKey())).deepCopy()
-                    : objectMapper.createObjectNode();
+            ObjectNode mergedValue = copyObjectMemberForMerge(target, entry.getKey());
             mergeObjectInto(mergedValue, value, filter, fieldName + "." + entry.getKey());
             target.set(entry.getKey(), mergedValue);
         });
     }
 
     private void mergeParams(ObjectNode target, JsonNode source, FilterConfigEntity filter, Map<String, String> paramOrigins) {
-        if (source == null || source.isMissingNode() || source.isNull()) {
-            return;
-        }
-        if (!source.isObject()) {
-            log.warn("Ignoring UI metadata params for filter {} because it is not an object", FilterTemplateGraphResolver.templatePathFor(filter));
-            return;
-        }
-
         String originFilterRef = FilterTemplateGraphResolver.templatePathFor(filter);
-        source.fields().forEachRemaining(entry -> {
+        forEachObjectMetadata(source, filter, FIELD_PARAMS, entry -> {
             JsonNode value = entry.getValue();
             if (!value.isObject()) {
                 log.warn(
@@ -119,9 +102,7 @@ public class FilterMetadataResolver {
             localParam.remove(FIELD_ORIGIN_FILTER_REF);
             localParam.remove(FIELD_RELATION);
 
-            ObjectNode mergedParam = target.has(entry.getKey()) && target.get(entry.getKey()).isObject()
-                    ? ((ObjectNode) target.get(entry.getKey())).deepCopy()
-                    : objectMapper.createObjectNode();
+            ObjectNode mergedParam = copyObjectMemberForMerge(target, entry.getKey());
             mergeObjectInto(mergedParam, localParam, filter, FIELD_PARAMS + "." + entry.getKey());
             target.set(entry.getKey(), mergedParam);
             paramOrigins.put(entry.getKey(), originFilterRef);
@@ -129,15 +110,7 @@ public class FilterMetadataResolver {
     }
 
     private void mergeObjectInto(ObjectNode target, JsonNode source, FilterConfigEntity filter, String fieldName) {
-        if (source == null || source.isMissingNode() || source.isNull()) {
-            return;
-        }
-        if (!source.isObject()) {
-            log.warn("Ignoring UI metadata {} for filter {} because it is not an object", fieldName, FilterTemplateGraphResolver.templatePathFor(filter));
-            return;
-        }
-
-        source.fields().forEachRemaining(entry -> {
+        forEachObjectMetadata(source, filter, fieldName, entry -> {
             JsonNode childValue = entry.getValue();
             JsonNode targetValue = target.get(entry.getKey());
             if (targetValue != null && targetValue.isObject() && childValue.isObject()) {
@@ -150,8 +123,40 @@ public class FilterMetadataResolver {
         });
     }
 
+    private void forEachObjectMetadata(
+            JsonNode source,
+            FilterConfigEntity filter,
+            String fieldName,
+            Consumer<Map.Entry<String, JsonNode>> consumer
+    ) {
+        if (isObjectMetadata(source, filter, fieldName)) {
+            source.properties().forEach(consumer);
+        }
+    }
+
+    private ObjectNode copyObjectMemberForMerge(ObjectNode target, String fieldName) {
+        JsonNode existing = target.get(fieldName);
+        return existing != null && existing.isObject()
+                ? ((ObjectNode) existing).deepCopy()
+                : objectMapper.createObjectNode();
+    }
+
+    private boolean isObjectMetadata(JsonNode source, FilterConfigEntity filter, String fieldName) {
+        if (source == null || source.isMissingNode() || source.isNull()) {
+            return false;
+        }
+        if (source.isObject()) {
+            return true;
+        }
+        log.warn(
+                "Ignoring UI metadata {} for filter {} because it is not an object",
+                fieldName,
+                FilterTemplateGraphResolver.templatePathFor(filter));
+        return false;
+    }
+
     private void decorateParams(ObjectNode params, Map<String, String> paramOrigins, String selectedFilterRef) {
-        params.fields().forEachRemaining(entry -> {
+        params.properties().forEach(entry -> {
             String paramName = entry.getKey();
             if (!entry.getValue().isObject()) {
                 return;
@@ -184,7 +189,7 @@ public class FilterMetadataResolver {
             Collection<String> effectiveParamNames
     ) {
         Set<String> effectiveNames = new LinkedHashSet<>(effectiveParamNames == null ? Set.of() : effectiveParamNames);
-        params.fieldNames().forEachRemaining(paramName -> {
+        params.propertyNames().forEach(paramName -> {
             if (!effectiveNames.contains(paramName)) {
                 log.warn(
                         "UI metadata param '{}' from filter {} does not exist in effective SQL params for selected filter {}",

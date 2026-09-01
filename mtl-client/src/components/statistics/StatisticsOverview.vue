@@ -1,11 +1,20 @@
 <template>
   <div class="overview">
-    <div v-if="overviewData && filteredCount !== totalCount" class="filter-banner" data-test="filter-banner">
-      <i class="bi bi-funnel-fill filter-banner__icon"></i>
+    <button
+      v-if="overviewData && filteredCount !== totalCount"
+      type="button"
+      class="filter-banner"
+      data-test="filter-banner"
+      :aria-label="`Open Filter. Showing ${filteredCount} of ${totalCount} tracks`"
+      @click="emit('open-filter')"
+      @keydown="openFilterFromKeyboard"
+    >
+      <i class="bi bi-funnel-fill filter-banner__icon" aria-hidden="true"></i>
       <span
         >Showing <strong>{{ filteredCount }}</strong> of {{ totalCount }} tracks</span
       >
-    </div>
+      <i class="bi bi-chevron-right filter-banner__arrow" aria-hidden="true"></i>
+    </button>
 
     <div v-if="hasTracks" class="hero-stats">
       <div class="hero-tile" data-test="summary-tracks">
@@ -50,6 +59,29 @@
           </button>
         </div>
       </div>
+      <div v-if="summary.totalAscent > 0" class="hero-tile" data-test="summary-ascent">
+        <div class="hero-tile__icon-wrap" style="--tile-accent: var(--warning-text)">
+          <i class="bi bi-arrow-up-right"></i>
+        </div>
+        <div v-tooltip.top="{ value: summary.totalAscentFull, showDelay: 400 }" class="hero-tile__value">
+          {{ summary.totalAscentFormatted }}
+        </div>
+        <div class="hero-tile__label">Ascent</div>
+      </div>
+      <button
+        v-tooltip.top="{ value: mediaTooltip, showDelay: 400 }"
+        type="button"
+        class="hero-tile hero-tile--action"
+        data-test="summary-media"
+        :aria-label="mediaAriaLabel"
+        @click="emit('open-media')"
+      >
+        <div class="hero-tile__icon-wrap" style="--tile-accent: var(--accent)">
+          <i class="bi bi-images"></i>
+        </div>
+        <div class="hero-tile__value">{{ mediaCountFormatted }}</div>
+        <div class="hero-tile__label">Media</div>
+      </button>
     </div>
 
     <div v-if="hasTracks" class="dashboard-grid">
@@ -424,7 +456,9 @@ import {
   formatDurationTooltip,
   formatDistanceTooltip,
   formatLocaleNumber,
-  formatNumber,
+  formatElevation,
+  formatSpeed,
+  formatVerticalRate,
 } from '@/utils/Utils';
 import { fetchStatisticsOverview, updateTrackStatisticsExclusion } from '@/utils/ServiceHelper';
 import {
@@ -432,6 +466,8 @@ import {
   type ActivityBreakdown as OverviewActivityBreakdown,
   type StatisticsExclusionUpdateRequestHighlightExclusionReasonEnum,
   type GpsTrack,
+  type Milestone as OverviewMilestone,
+  MilestoneDimension as MilestoneDimensionEnum,
   type PeriodDistribution as OverviewPeriodDistribution,
   type PeriodRow as OverviewPeriodRow,
   type StatisticsOverviewResponseDto,
@@ -445,6 +481,9 @@ import ActivityTypeBadge, {
   ACTIVITY_ICONS,
 } from '@/components/ui/ActivityTypeBadge.vue';
 import type { ActiveFilterRequest } from '@/stores/filterStore';
+import { useAsyncState } from '@/composables/useAsyncState';
+import { useMeasurementSystem } from '@/composables/useMeasurementSystem';
+import type { ToastService } from '@/types/ui';
 
 const MILESTONE_LIMIT = 8;
 const DRILLDOWN_PREVIEW_LIMIT = 100;
@@ -463,14 +502,12 @@ const INFO_QUICKEST_ASCENT =
 const INFO_ACTIVE_PERIODS =
   'Most active periods are selected by total moving time using server-side filtered statistics. Ties use track count first, then distance.';
 const INFO_MILESTONES =
-  'Milestones are calculated server-side only from the tracks currently included by the active filter.';
+  'Milestones use the selected measurement system and are calculated server-side only from tracks included by the active filter.';
+const INFO_MEDIA_FALLBACK = 'Every indexed photo and video. Activity filters do not apply.';
 
 type InfoPopover = {
   toggle: (event: Event) => void;
   hide?: () => void;
-};
-type ToastService = {
-  add: (message: { severity: string; summary: string; detail?: string; life?: number }) => void;
 };
 type ExclusionReason = StatisticsExclusionUpdateRequestHighlightExclusionReasonEnum;
 type ExclusionReasonOption = {
@@ -548,12 +585,19 @@ const props = defineProps<{
   unfilteredTotal?: number;
   filterRevision?: number;
   filterRequest?: ActiveFilterRequest | null;
+  retryRevision?: number;
+  indexedMediaCount?: number | null;
+  indexedPhotoCount?: number | null;
+  indexedVideoCount?: number | null;
 }>();
 
 const emit = defineEmits<{
   (event: 'open-details', id: number | string): void;
+  (event: 'open-filter'): void;
+  (event: 'track-updated', track: GpsTrack): void;
   (event: 'view-all-tracks'): void;
   (event: 'view-highlight-exclusions'): void;
+  (event: 'open-media'): void;
 }>();
 
 const infoPopover = ref<InfoPopover | null>(null);
@@ -563,8 +607,8 @@ const activityMetric = ref<ActivityMetric>('tracks');
 const selectedHighlightKey = ref<string | null>(null);
 const selectedPeriodKey = ref<string | null>(null);
 const overviewData = ref<StatisticsOverviewResponseDto | null>(null);
-const loading = ref(false);
-const loadError = ref(false);
+const { measurementSystem } = useMeasurementSystem();
+const { loading, error: loadError } = useAsyncState(false);
 const activeRequest = ref<AbortController | null>(null);
 const pendingHighlightExclusionRow = ref<DrilldownRow | null>(null);
 const pendingHighlightExclusionReason = ref<ExclusionReason>(HIGHLIGHT_EXCLUSION_DEFAULT_REASON);
@@ -572,10 +616,39 @@ const savingHighlightExclusion = ref(false);
 const toast = inject<ToastService>('toast', { add: () => undefined });
 let requestSerial = 0;
 
+function openFilterFromKeyboard(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  emit('open-filter');
+}
+
 const totalCount = computed(() => props.unfilteredTotal ?? filteredCount.value);
 const filteredCount = computed(() => Math.round(numberValue(overviewData.value?.summary?.trackCount)));
 const hasTracks = computed(() => filteredCount.value > 0);
 const hasEnergy = computed(() => numberValue(overviewData.value?.summary?.energyWh) > 0);
+const mediaCount = computed(() =>
+  props.indexedMediaCount == null ? null : Math.max(0, Math.round(numberValue(props.indexedMediaCount)))
+);
+const photoCount = computed(() =>
+  props.indexedPhotoCount == null ? null : Math.max(0, Math.round(numberValue(props.indexedPhotoCount)))
+);
+const videoCount = computed(() =>
+  props.indexedVideoCount == null ? null : Math.max(0, Math.round(numberValue(props.indexedVideoCount)))
+);
+const mediaCountFormatted = computed(() =>
+  mediaCount.value == null ? '\u2014' : formatLocaleNumber(mediaCount.value)
+);
+const mediaTooltip = computed(() => {
+  if (photoCount.value == null || videoCount.value == null) return INFO_MEDIA_FALLBACK;
+  const photoLabel = photoCount.value === 1 ? 'photo' : 'photos';
+  const videoLabel = videoCount.value === 1 ? 'video' : 'videos';
+  return `${formatLocaleNumber(photoCount.value)} ${photoLabel} and ${formatLocaleNumber(videoCount.value)} ${videoLabel} are indexed. Activity filters do not apply.`;
+});
+const mediaAriaLabel = computed(() => {
+  if (mediaCount.value == null) return 'Indexed media count unavailable. Open media trends.';
+  const itemLabel = mediaCount.value === 1 ? 'item' : 'items';
+  return `${mediaCountFormatted.value} indexed media ${itemLabel}. Open media trends.`;
+});
 const highlightExcludedCount = computed(() =>
   Math.round(numberValue(overviewData.value?.exclusionSummary?.highlightExcludedTrackCount))
 );
@@ -617,6 +690,7 @@ const summary = computed(() => {
   const data = overviewData.value?.summary;
   const totalDistanceMeters = numberValue(data?.distanceM);
   const totalDurationMillis = numberValue(data?.durationMs);
+  const totalAscent = numberValue(data?.ascentM);
   const totalEnergy = numberValue(data?.energyWh);
   const oldestStart = parseDate(data?.oldestStart);
   const newestStart = parseDate(data?.newestStart);
@@ -627,6 +701,9 @@ const summary = computed(() => {
     totalDistanceFull: formatDistanceTooltip(totalDistanceMeters),
     totalDurationFormatted: formatDurationSmart(totalDurationMillis),
     totalDurationFull: formatDurationTooltip(totalDurationMillis),
+    totalAscent,
+    totalAscentFormatted: formatElevation(totalAscent),
+    totalAscentFull: formatElevation(totalAscent),
     totalEnergy,
     totalEnergyFormatted: formatEnergy(totalEnergy),
     dateRangeLabel: oldestStart && newestStart ? `${formatDate(oldestStart)} - ${formatDate(newestStart)}` : '',
@@ -752,9 +829,18 @@ const periodDistributionByKey = computed(() => {
   return distributions;
 });
 
-const milestoneRows = computed<DetailRow[]>(() =>
-  (overviewData.value?.milestones ?? []).map(toMilestoneRow).filter((row): row is DetailRow => row != null)
-);
+const milestoneRows = computed<DetailRow[]>(() => {
+  const data = overviewData.value;
+  if (!data || data.measurementSystem !== measurementSystem.value) return [];
+
+  const rows: DetailRow[] = [];
+  const firstActivity = toActivityMilestoneRow('first-activity', data.firstActivity);
+  const latestActivity = toActivityMilestoneRow('latest-activity', data.latestActivity);
+  if (firstActivity) rows.push(firstActivity);
+  if (latestActivity) rows.push(latestActivity);
+  rows.push(...(data.milestones ?? []).map(toMilestoneRow).filter((row): row is DetailRow => row != null));
+  return rows;
+});
 
 const visibleMilestones = computed(() => {
   const rows = milestoneRows.value;
@@ -762,7 +848,7 @@ const visibleMilestones = computed(() => {
 
   const first = rows.find((row) => row.key === 'first-activity');
   const latest = rows.find((row) => row.key === 'latest-activity');
-  const energy = rows.find((row) => row.key === 'energy-1000');
+  const energy = rows.find((row) => row.key.startsWith('energy-'));
   const distanceRows = rows.filter((row) => row.key.startsWith('distance-')).slice(-2);
   const ascentRows = rows.filter((row) => row.key.startsWith('ascent-')).slice(-2);
   return [first, latest, ...distanceRows, ...ascentRows, energy].filter((row): row is DetailRow => row != null);
@@ -817,6 +903,15 @@ watch(
   },
   { deep: false }
 );
+watch(
+  () => props.retryRevision,
+  () => {
+    void loadOverview();
+  }
+);
+watch(measurementSystem, () => {
+  void loadOverview();
+});
 
 async function loadOverview() {
   const requestId = ++requestSerial;
@@ -827,7 +922,11 @@ async function loadOverview() {
   loadError.value = false;
 
   try {
-    const data = await fetchStatisticsOverview(controller.signal, props.filterRequest ?? undefined);
+    const data = await fetchStatisticsOverview(
+      measurementSystem.value,
+      controller.signal,
+      props.filterRequest ?? undefined
+    );
     if (requestId !== requestSerial || controller.signal.aborted) return;
     overviewData.value = data;
     selectedHighlightKey.value = null;
@@ -877,9 +976,10 @@ async function saveHighlightExclusion() {
   savingHighlightExclusion.value = true;
 
   try {
-    await updateTrackStatisticsExclusion(row.trackId, {
+    const savedTrack = await updateTrackStatisticsExclusion(row.trackId, {
       highlightExclusionReason: pendingHighlightExclusionReason.value,
     });
+    emit('track-updated', savedTrack);
     highlightExclusionPopover.value?.hide?.();
     pendingHighlightExclusionRow.value = null;
     await loadOverview();
@@ -959,16 +1059,32 @@ function toPeriodRow(row: OverviewPeriodRow): PeriodViewRow | null {
   };
 }
 
-function toMilestoneRow(row: OverviewTrackRef): DetailRow | null {
-  const key = row.rowKey ?? '';
-  const meta = milestoneMeta(key);
-  if (!meta) return null;
+function toActivityMilestoneRow(
+  key: 'first-activity' | 'latest-activity',
+  row: OverviewTrackRef | undefined
+): DetailRow | null {
+  if (!row) return null;
   const track = toTrackView(row);
   return {
     key,
+    label: key === 'first-activity' ? 'First activity' : 'Latest activity',
+    subtitle: track?.displayName ?? fallbackTrackName(row.trackId),
+    value: formatTrackDate(track?.startDate),
+    icon: key === 'first-activity' ? 'bi bi-sunrise' : 'bi bi-clock-history',
+    color: key === 'first-activity' ? 'var(--chart-series-1)' : 'var(--info)',
+    trackId: row.trackId,
+  };
+}
+
+function toMilestoneRow(row: OverviewMilestone): DetailRow | null {
+  const meta = milestoneMeta(row);
+  if (!meta) return null;
+  const track = toTrackView({ trackId: row.trackId });
+  return {
+    key: `${meta.key}-${numberValue(row.sortOrder)}`,
     label: meta.label,
     subtitle: track?.displayName ?? fallbackTrackName(row.trackId),
-    value: milestoneValue(key, row, track),
+    value: milestoneValue(row),
     icon: meta.icon,
     color: meta.color,
     trackId: row.trackId,
@@ -1023,46 +1139,56 @@ function periodMeta(key: string): { label: string; icon: string; color: string }
   }
 }
 
-function milestoneMeta(key: string): { label: string; icon: string; color: string } | null {
-  if (key === 'first-activity')
-    return { label: 'First activity', icon: 'bi bi-sunrise', color: 'var(--chart-series-1)' };
-  if (key === 'latest-activity') return { label: 'Latest activity', icon: 'bi bi-clock-history', color: 'var(--info)' };
-  if (key === 'distance-10000')
-    return { label: 'First 10 km track', icon: 'bi bi-signpost-split', color: 'var(--chart-series-2)' };
-  if (key === 'distance-25000')
-    return { label: 'First 25 km track', icon: 'bi bi-signpost-split', color: 'var(--chart-series-2)' };
-  if (key === 'distance-50000')
-    return { label: 'First 50 km track', icon: 'bi bi-signpost-split', color: 'var(--chart-series-2)' };
-  if (key === 'distance-100000')
-    return { label: 'First 100 km track', icon: 'bi bi-signpost-split', color: 'var(--chart-series-2)' };
-  if (key === 'ascent-500')
-    return { label: 'First 500 m ascent', icon: 'bi bi-arrow-up-right', color: 'var(--warning-text)' };
-  if (key === 'ascent-1000')
-    return { label: 'First 1000 m ascent', icon: 'bi bi-arrow-up-right', color: 'var(--warning-text)' };
-  if (key === 'ascent-2000')
-    return { label: 'First 2000 m ascent', icon: 'bi bi-arrow-up-right', color: 'var(--warning-text)' };
-  if (key === 'energy-1000')
-    return { label: 'First 1000 Wh activity', icon: 'bi bi-lightning-charge', color: 'var(--chart-series-3)' };
-  return null;
+function milestoneMeta(row: OverviewMilestone): { key: string; label: string; icon: string; color: string } | null {
+  switch (row.dimension) {
+    case MilestoneDimensionEnum.Distance:
+      return {
+        key: 'distance',
+        label: `First ${formatDistanceSmart(numberValue(row.thresholdM))} track`,
+        icon: 'bi bi-signpost-split',
+        color: 'var(--chart-series-2)',
+      };
+    case MilestoneDimensionEnum.Ascent:
+      return {
+        key: 'ascent',
+        label: `First ${formatElevation(numberValue(row.thresholdM))} ascent`,
+        icon: 'bi bi-arrow-up-right',
+        color: 'var(--warning-text)',
+      };
+    case MilestoneDimensionEnum.Energy:
+      return {
+        key: 'energy',
+        label: `First ${formatEnergy(numberValue(row.thresholdWh))} activity`,
+        icon: 'bi bi-lightning-charge',
+        color: 'var(--chart-series-3)',
+      };
+    default:
+      return null;
+  }
 }
 
 function highlightValue(key: string, value: number): string {
   if (key === 'longest-distance') return formatDistanceSmart(value);
   if (key === 'longest-duration') return formatDurationSmart(value);
-  if (key === 'biggest-ascent') return formatMeters(value);
-  if (key === 'quickest-ascent') return `${formatLocaleNumber(Math.round(value))} m/h`;
+  if (key === 'biggest-ascent') return formatElevation(value);
+  if (key === 'quickest-ascent') return formatVerticalRate(value);
   if (key === 'most-energy') return formatEnergy(value);
-  if (key === 'fastest-speed') return `${formatNumber(value, 1)} km/h`;
+  if (key === 'fastest-speed') return formatSpeed(value, 1);
   if (key === 'peak-power') return `${formatLocaleNumber(Math.round(value))} W`;
   return '';
 }
 
-function milestoneValue(key: string, row: OverviewTrackRef, track: TrackView | null): string {
-  if (key === 'first-activity' || key === 'latest-activity') return formatTrackDate(track?.startDate);
-  if (key.startsWith('distance-')) return formatDistanceSmart(numberValue(row.value ?? track?.distanceM));
-  if (key.startsWith('ascent-')) return formatMeters(numberValue(row.value ?? track?.ascentM));
-  if (key === 'energy-1000') return formatEnergy(numberValue(row.value ?? track?.energyWh));
-  return '';
+function milestoneValue(row: OverviewMilestone): string {
+  switch (row.dimension) {
+    case MilestoneDimensionEnum.Distance:
+      return formatDistanceSmart(numberValue(row.achievedM));
+    case MilestoneDimensionEnum.Ascent:
+      return formatElevation(numberValue(row.achievedM));
+    case MilestoneDimensionEnum.Energy:
+      return formatEnergy(numberValue(row.achievedWh));
+    default:
+      return '';
+  }
 }
 
 function toRankingDrilldownRow(key: string, row: OverviewTrackRef): DrilldownRow | null {
@@ -1156,10 +1282,6 @@ function formatEnergy(value: number): string {
   return `${formatLocaleNumber(Math.round(value))} Wh`;
 }
 
-function formatMeters(value: number): string {
-  return `${formatLocaleNumber(Math.round(value))} m`;
-}
-
 function formatTrackDate(value: Date | string | number | null | undefined): string {
   return formatDateAndTime(value);
 }
@@ -1212,14 +1334,30 @@ function numberValue(value: unknown): number {
 
 .filter-banner {
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
+  border: 1px solid var(--accent-subtle);
   border-radius: 8px;
   background: var(--accent-bg);
-  border: 1px solid var(--accent-subtle);
-  font-size: var(--text-sm-size);
   color: var(--accent-text);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease;
+}
+
+.filter-banner:hover {
+  background: color-mix(in srgb, var(--accent-bg) 75%, var(--accent-subtle));
+}
+
+.filter-banner:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 2px;
 }
 
 .filter-banner__icon {
@@ -1227,9 +1365,14 @@ function numberValue(value: unknown): number {
   opacity: 0.7;
 }
 
+.filter-banner__arrow {
+  margin-left: auto;
+  font-size: var(--text-xs-size);
+}
+
 .hero-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.75rem;
 }
 
@@ -1251,6 +1394,20 @@ function numberValue(value: unknown): number {
 .hero-tile:hover {
   background: var(--surface-hover);
   border-color: var(--border-medium);
+}
+
+.hero-tile--action {
+  width: 100%;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: center;
+}
+
+.hero-tile--action:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 2px;
 }
 
 .hero-tile__icon-wrap {
@@ -1504,6 +1661,7 @@ function numberValue(value: unknown): number {
 
 .insight-row__main,
 .recent-row,
+.period-row,
 .milestone-row {
   display: flex;
   align-items: center;
@@ -1566,7 +1724,8 @@ function numberValue(value: unknown): number {
 .insight-row__label,
 .recent-row__name,
 .period-row__label,
-.milestone-row__label {
+.milestone-row__label,
+.drilldown-row__label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1666,21 +1825,6 @@ function numberValue(value: unknown): number {
   font-size: var(--text-xs-size);
   font-weight: 550;
   color: var(--text-muted);
-}
-
-.period-row {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  width: 100%;
-  min-width: 0;
-  padding: 0.58rem 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
 }
 
 .drilldown-panel {
@@ -1817,26 +1961,20 @@ function numberValue(value: unknown): number {
   gap: 0.12rem;
 }
 
-.drilldown-row__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-sm-size);
-  font-weight: 700;
-  color: var(--text-primary);
-  transition: color 0.15s;
-}
-
-.drilldown-row__meta {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
+.drilldown-row__meta,
+.highlight-exclusion-popover__track {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-muted);
   font-size: var(--text-xs-size);
+}
+
+.drilldown-row__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .drilldown-row__stats {
@@ -1948,15 +2086,6 @@ function numberValue(value: unknown): number {
   color: var(--text-primary);
   font-size: var(--text-sm-size);
   font-weight: 750;
-}
-
-.highlight-exclusion-popover__track {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-muted);
-  font-size: var(--text-xs-size);
 }
 
 .highlight-exclusion-popover__select {

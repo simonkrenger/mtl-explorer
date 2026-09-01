@@ -6,7 +6,11 @@ import type {
   LocationSearchStatusDto,
 } from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
 import { getApiConfiguration } from '@/utils/openApiClient';
+import { fetchLocationSearchStatus } from '@/utils/locationSearchStatusService';
 import { getToken, isAuthError, redirectToLoginAfterAuthFailure } from '@/utils/auth';
+import { useAsyncState } from '@/composables/useAsyncState';
+import { isAbortLikeError } from '@/utils/errors';
+import { formatDistanceSmart } from '@/utils/Utils';
 
 export type LocationSearchSort = 'importance' | 'distance';
 
@@ -19,6 +23,7 @@ export const SEARCH_QUERY_MIN_LENGTH = 2;
 export const SEARCH_LIMIT = 20;
 export const SEARCH_DEBOUNCE_MS = 300;
 export const LOCATION_SEARCH_Z_INDEX = 5250;
+export const EMPTY_SEARCH_PROMPT = 'Search for a city, peak, or area';
 export const SEARCH_DETENTS = [
   { id: 'compact', height: '44vh' },
   { id: 'medium', height: '66vh' },
@@ -43,9 +48,8 @@ export function useLocationSearch(options: UseLocationSearchOptions) {
   const inputEl = ref<HTMLInputElement | null>(null);
   const query = ref('');
   const selectedSort = ref<LocationSearchSort>(SORT_IMPORTANCE);
-  const loading = ref(false);
+  const { loading, error: errorMessage } = useAsyncState('');
   const status = ref<LocationSearchStatusDto | null>(null);
-  const errorMessage = ref('');
   const results = ref<LocationSearchResultDto[]>([]);
 
   let debounceTimer: ReturnType<typeof window.setTimeout> | null = null;
@@ -58,6 +62,9 @@ export function useLocationSearch(options: UseLocationSearchOptions) {
     if (errorMessage.value) return errorMessage.value;
     if (status.value && status.value.ready === false) {
       return status.value.message || status.value.phase || 'Search is not ready';
+    }
+    if (trimmedQuery.value.length === 0) {
+      return EMPTY_SEARCH_PROMPT;
     }
     if (trimmedQuery.value.length > 0 && trimmedQuery.value.length < SEARCH_QUERY_MIN_LENGTH) {
       return 'Keep typing';
@@ -98,10 +105,13 @@ export function useLocationSearch(options: UseLocationSearchOptions) {
   async function refreshStatus() {
     statusController?.abort();
     statusController = new AbortController();
+    const currentStatusController = statusController;
     try {
-      status.value = await getLocationSearchApi().getStatus({ signal: statusController.signal });
+      const nextStatus = await fetchLocationSearchStatus();
+      if (currentStatusController.signal.aborted) return;
+      status.value = nextStatus;
     } catch (error: unknown) {
-      if (isAbortError(error, statusController.signal)) return;
+      if (isAbortLikeError(error, currentStatusController.signal)) return;
       if (isAuthError(error)) {
         redirectToLoginAfterAuthFailure(!!getToken());
         return;
@@ -163,7 +173,7 @@ export function useLocationSearch(options: UseLocationSearchOptions) {
         response.ready === false ? { ready: false, phase: response.phase, message: response.message } : status.value;
       results.value = response.ready === false ? [] : (response.results ?? []);
     } catch (error: unknown) {
-      if (isAbortError(error, searchController.signal)) return;
+      if (isAbortLikeError(error, searchController.signal)) return;
       if (isAuthError(error)) {
         redirectToLoginAfterAuthFailure(!!getToken());
         return;
@@ -225,14 +235,6 @@ function validMapCenter(center: MapCenter | null): center is MapCenter {
   return Boolean(center) && Number.isFinite(center?.lat) && Number.isFinite(center?.lon);
 }
 
-function isAbortError(error: unknown, signal?: AbortSignal): boolean {
-  return (
-    signal?.aborted === true ||
-    (error instanceof DOMException && error.name === 'AbortError') ||
-    (error instanceof Error && error.name === 'AbortError')
-  );
-}
-
 export function resultKey(result: LocationSearchResultDto): string {
   return [
     result.displayName,
@@ -286,10 +288,7 @@ export function zoomLabel(result: LocationSearchResultDto): string {
 export function distanceLabel(result: LocationSearchResultDto): string {
   const meters = result.distanceMeters;
   if (meters == null || !Number.isFinite(meters)) return '';
-  if (meters < 1000) return `${Math.round(meters)} m`;
-  const km = meters / 1000;
-  if (km < 100) return `${km.toFixed(1)} km`;
-  return `${Math.round(km)} km`;
+  return formatDistanceSmart(meters);
 }
 
 function normalizeText(value: string): string {

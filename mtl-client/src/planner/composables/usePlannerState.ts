@@ -6,6 +6,7 @@ import { computed, ref } from 'vue';
 import type { LegResult, LiveStats, Waypoint } from '@/planner/types';
 import type { PlannedTrackDetailDto } from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
 import { computeRoute, emptyStats, prewarmForBbox } from '@/planner/repositories/plannerRepository';
+import { isAbortLikeError } from '@/utils/errors';
 import {
   MAX_PLANNING_SPAN_KM,
   MAX_PREWARM_KM,
@@ -224,9 +225,25 @@ export function usePlannerState() {
   function clearAll() {
     clearPristine();
     snapshotForUndo();
+    if (debounceTimer !== null) {
+      window.clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (segmentRetryTimer !== null) {
+      window.clearTimeout(segmentRetryTimer);
+      segmentRetryTimer = null;
+    }
+    if (abortCtrl) {
+      abortCtrl.abort();
+      abortCtrl = null;
+    }
+    routeRequestSeq++;
+    segmentRetryCount = 0;
     waypoints.value = [];
     legs.value = [];
     stats.value = emptyStats();
+    computing.value = false;
+    lastError.value = null;
   }
 
   /**
@@ -393,7 +410,8 @@ export function usePlannerState() {
       return;
     }
     if (abortCtrl) abortCtrl.abort();
-    abortCtrl = new AbortController();
+    const requestAbortCtrl = new AbortController();
+    abortCtrl = requestAbortCtrl;
     const requestSeq = ++routeRequestSeq;
     const requestProfile = profile.value;
     const requestWaypoints = waypoints.value.map((w) => ({ ...w }));
@@ -404,7 +422,7 @@ export function usePlannerState() {
       segmentRetryTimer = null;
     }
     try {
-      const resp = await computeRoute(requestWaypoints, requestProfile, abortCtrl.signal);
+      const resp = await computeRoute(requestWaypoints, requestProfile, requestAbortCtrl.signal);
       if (
         requestSeq !== routeRequestSeq ||
         requestProfile !== profile.value ||
@@ -422,7 +440,7 @@ export function usePlannerState() {
         response?: { status?: number; data?: { error?: string; detail?: string } };
         message?: string;
       };
-      if (err?.code === 'ERR_CANCELED') return;
+      if (isAbortLikeError(e, requestAbortCtrl.signal)) return;
 
       const errorCode = err?.response?.data?.error;
 

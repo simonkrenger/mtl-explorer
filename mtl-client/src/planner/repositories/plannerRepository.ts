@@ -11,7 +11,9 @@
  * file and move the remaining endpoints over to the generated client.
  */
 import { apiClient } from '@/utils/apiClient';
+import { apiUrl } from '@/utils/apiBase';
 import { getApiConfiguration } from '@/utils/openApiClient';
+import { createStatusRequestService, type StatusRequestOptions } from '@/utils/statusPolling';
 import { PlannerControllerApi } from 'x8ing-mtl-api-typescript-fetch';
 import type {
   PlannedTrackDetailDto,
@@ -30,7 +32,6 @@ import type {
 } from '@/planner/types';
 
 const GPX_FILE_EXTENSION = '.gpx';
-const GPX_MIME_TYPE = 'application/gpx+xml';
 const GPX_FILENAME_FALLBACK = 'planned-route';
 const INVALID_FILENAME_CHARS = /[\\/:*?"<>|]+/g;
 const WHITESPACE_CHARS = /\s+/g;
@@ -38,6 +39,10 @@ const WHITESPACE_CHARS = /\s+/g;
 function getPlannerApi(): PlannerControllerApi {
   return new PlannerControllerApi(getApiConfiguration());
 }
+
+const plannerStatusRequests = createStatusRequestService<SidecarStatus>({
+  request: (signal) => getPlannerApi().status({ signal }),
+});
 
 export async function fetchPlannerConfig(): Promise<{
   profiles: string[];
@@ -70,8 +75,8 @@ export async function computeRoute(
   return r.data;
 }
 
-export async function fetchSidecarStatus(): Promise<SidecarStatus> {
-  return getPlannerApi().status();
+export async function fetchSidecarStatus(options: StatusRequestOptions = {}): Promise<SidecarStatus> {
+  return plannerStatusRequests.fetch(options);
 }
 
 export interface SaveArgs {
@@ -130,21 +135,18 @@ export async function deletePlannedTrack(id: number): Promise<void> {
 }
 
 /**
- * GPX download. Use the generated client's raw response path because the
- * convenience method returns text while browser download needs a Blob.
+ * Start a native same-origin download while the original pointer event is
+ * active. The generated client models this byte response as text, and waiting
+ * for a fetched Blob before clicking an anchor can cause browsers to block the
+ * delayed download.
  */
 export async function downloadPlannedTrackGpx(id: number, name: string): Promise<void> {
-  const response = await getPlannerApi().downloadGpxRaw({ id });
-  const blob = await response.raw.blob();
-  const typedBlob = blob.type ? blob : new Blob([blob], { type: GPX_MIME_TYPE });
-  const url = URL.createObjectURL(typedBlob);
   const a = document.createElement('a');
-  a.href = url;
+  a.href = apiUrl(`${PLANNER_API_BASE}/plans/${id}/gpx`);
   a.download = makeGpxFileName(name);
   document.body.appendChild(a);
   a.click();
   a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function makeGpxFileName(name: string): string {

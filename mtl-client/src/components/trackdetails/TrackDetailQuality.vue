@@ -29,6 +29,56 @@
       </div>
     </details>
 
+    <div class="section-label"><i class="bi bi-sliders"></i> Track Curation</div>
+    <div class="curation-panel" data-test="statistics-curation">
+      <div class="curation-row">
+        <span class="curation-row__label">Activity Type</span>
+        <Select
+          :model-value="activityType"
+          :options="activityTypeOptions"
+          option-label="label"
+          option-value="value"
+          placeholder="Select activity"
+          class="curation-select"
+          :disabled="savingActivityType"
+          data-test="activity-type-select"
+          @update:model-value="onActivityTypeChange"
+        />
+      </div>
+      <div class="curation-row">
+        <span class="curation-row__label">Statistics</span>
+        <Select
+          :model-value="statisticsReason"
+          :options="exclusionReasonOptions"
+          option-label="label"
+          option-value="value"
+          placeholder="Included"
+          class="curation-select"
+          :disabled="savingCuration"
+          data-test="statistics-exclusion-select"
+          @update:model-value="onStatisticsReasonChange"
+        />
+      </div>
+      <div class="curation-row">
+        <span class="curation-row__label">Highlights</span>
+        <Select
+          :model-value="highlightReason"
+          :options="exclusionReasonOptions"
+          option-label="label"
+          option-value="value"
+          placeholder="Included"
+          class="curation-select"
+          :disabled="savingCuration"
+          data-test="highlight-exclusion-select"
+          @update:model-value="onHighlightReasonChange"
+        />
+      </div>
+      <div v-if="hasAnyExclusion" class="curation-note" data-test="curation-note">
+        <i class="bi bi-shield-exclamation"></i>
+        <span>{{ curationNote }}</span>
+      </div>
+    </div>
+
     <!-- Point Quality Metrics -->
     <div class="section-label"><i class="bi bi-rulers"></i> Point Quality</div>
     <div class="metrics-grid">
@@ -62,42 +112,6 @@
           {{ formatOptionalDistance(gpsTrack.maxDistanceBetweenPoints) }}
         </div>
         <div class="metric-tile__label">Max Pt. Distance</div>
-      </div>
-    </div>
-
-    <div class="section-label"><i class="bi bi-sliders"></i> Statistics Curation</div>
-    <div class="curation-panel" data-test="statistics-curation">
-      <div class="curation-row">
-        <span class="curation-row__label">Highlights</span>
-        <Select
-          :model-value="highlightReason"
-          :options="exclusionReasonOptions"
-          option-label="label"
-          option-value="value"
-          placeholder="Included"
-          class="curation-select"
-          :disabled="savingCuration"
-          data-test="highlight-exclusion-select"
-          @update:model-value="onHighlightReasonChange"
-        />
-      </div>
-      <div class="curation-row">
-        <span class="curation-row__label">Statistics</span>
-        <Select
-          :model-value="statisticsReason"
-          :options="exclusionReasonOptions"
-          option-label="label"
-          option-value="value"
-          placeholder="Included"
-          class="curation-select"
-          :disabled="savingCuration"
-          data-test="statistics-exclusion-select"
-          @update:model-value="onStatisticsReasonChange"
-        />
-      </div>
-      <div v-if="hasAnyExclusion" class="curation-note" data-test="curation-note">
-        <i class="bi bi-shield-exclamation"></i>
-        <span>{{ curationNote }}</span>
       </div>
     </div>
 
@@ -283,24 +297,44 @@
 import { computed, inject, ref, watch } from 'vue';
 import { formatBytes, formatDateAndTime, formatDistance, formatDistanceTooltip } from '@/utils/Utils';
 import ActivityTypeBadge from '@/components/ui/ActivityTypeBadge.vue';
-import { updateTrackStatisticsExclusion } from '@/utils/ServiceHelper';
+import { updateTrackActivityType, updateTrackStatisticsExclusion } from '@/utils/ServiceHelper';
 import {
+  GpsTrackActivityTypeEnum,
   StatisticsExclusionUpdateRequestHighlightExclusionReasonEnum as ExclusionReasonEnum,
   type GpsTrack,
+  type GpsTrackActivityTypeEnum as ActivityType,
   type StatisticsExclusionUpdateRequest,
   type StatisticsExclusionUpdateRequestHighlightExclusionReasonEnum,
   type StatisticsExclusionUpdateRequestStatisticsExclusionReasonEnum,
 } from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
+import type { ToastService } from '@/types/ui';
 
-type ToastService = {
-  add: (message: { severity: string; summary: string; detail?: string; life?: number }) => void;
-};
 type ExclusionReason = StatisticsExclusionUpdateRequestHighlightExclusionReasonEnum;
 type ExclusionReasonOption = {
   label: string;
   value: ExclusionReason | null;
 };
+type ActivityTypeOption = {
+  label: string;
+  value: ActivityType;
+};
 
+const activityTypeOptions: ActivityTypeOption[] = [
+  { label: 'Bicycle', value: GpsTrackActivityTypeEnum.Bicycle },
+  { label: 'Walking', value: GpsTrackActivityTypeEnum.Walking },
+  { label: 'Hiking', value: GpsTrackActivityTypeEnum.Hiking },
+  { label: 'Running', value: GpsTrackActivityTypeEnum.Running },
+  { label: 'Mountain biking', value: GpsTrackActivityTypeEnum.MountainBiking },
+  { label: 'Stand-up paddle', value: GpsTrackActivityTypeEnum.StandUpPaddle },
+  { label: 'Rowing', value: GpsTrackActivityTypeEnum.Rowing },
+  { label: 'Kayaking', value: GpsTrackActivityTypeEnum.Kayaking },
+  { label: 'Skiing', value: GpsTrackActivityTypeEnum.Skiing },
+  { label: 'Motorbiking', value: GpsTrackActivityTypeEnum.Motorbiking },
+  { label: 'Car', value: GpsTrackActivityTypeEnum.Car },
+  { label: 'Airplane', value: GpsTrackActivityTypeEnum.Airplane },
+  { label: 'Supersonic', value: GpsTrackActivityTypeEnum.SuperSonic },
+];
+const activityTypeValues = new Set<ActivityType>(Object.values(GpsTrackActivityTypeEnum));
 const exclusionReasonOptions: ExclusionReasonOption[] = [
   { label: 'Included', value: null },
   { label: 'GPS noise', value: ExclusionReasonEnum.GpsNoise },
@@ -330,9 +364,12 @@ const emit = defineEmits<{
 
 const gpsTrack = computed(() => props.gpsTrack);
 const toast = inject<ToastService>('toast', { add: () => undefined });
+const activityType = ref<ActivityType | null>(null);
 const highlightReason = ref<ExclusionReason | null>(null);
 const statisticsReason = ref<ExclusionReason | null>(null);
+const savingActivityType = ref(false);
 const savingCuration = ref(false);
+let activityTypeSaveSerial = 0;
 let curationSaveSerial = 0;
 
 const hasAnyExclusion = computed(() => highlightReason.value != null || statisticsReason.value != null);
@@ -343,8 +380,14 @@ const curationNote = computed(() => {
 });
 
 watch(
-  () => [props.gpsTrack?.id, props.gpsTrack?.highlightExclusionReason, props.gpsTrack?.statisticsExclusionReason],
+  () => [
+    props.gpsTrack?.id,
+    props.gpsTrack?.activityType,
+    props.gpsTrack?.highlightExclusionReason,
+    props.gpsTrack?.statisticsExclusionReason,
+  ],
   () => {
+    activityType.value = normalizeActivityType(props.gpsTrack?.activityType);
     highlightReason.value = normalizeExclusionReason(props.gpsTrack?.highlightExclusionReason);
     statisticsReason.value = normalizeExclusionReason(props.gpsTrack?.statisticsExclusionReason);
   },
@@ -430,6 +473,17 @@ function navigateTrack(trackId: number | null | undefined) {
   }
 }
 
+async function onActivityTypeChange(value: ActivityType | null) {
+  const normalizedType = normalizeActivityType(value);
+  if (normalizedType == null) {
+    activityType.value = normalizeActivityType(props.gpsTrack?.activityType);
+    return;
+  }
+
+  activityType.value = normalizedType;
+  await saveActivityType(normalizedType);
+}
+
 async function onHighlightReasonChange(value: ExclusionReason | null) {
   highlightReason.value = normalizeExclusionReason(value);
   await saveCuration();
@@ -471,6 +525,36 @@ async function saveCuration() {
   } finally {
     if (saveSerial === curationSaveSerial) savingCuration.value = false;
   }
+}
+
+async function saveActivityType(selectedType: ActivityType) {
+  const track = props.gpsTrack;
+  if (!track?.id || selectedType === track.activityType) return;
+
+  const saveSerial = ++activityTypeSaveSerial;
+  savingActivityType.value = true;
+
+  try {
+    const savedTrack = await updateTrackActivityType(track.id, selectedType);
+    if (saveSerial !== activityTypeSaveSerial) return;
+    emit('track-updated', savedTrack);
+    toast.add({ severity: 'success', summary: 'Activity type saved', life: 1800 });
+  } catch {
+    if (saveSerial !== activityTypeSaveSerial) return;
+    activityType.value = normalizeActivityType(props.gpsTrack?.activityType);
+    toast.add({
+      severity: 'error',
+      summary: 'Save failed',
+      detail: 'Could not update the activity type.',
+      life: 4000,
+    });
+  } finally {
+    if (saveSerial === activityTypeSaveSerial) savingActivityType.value = false;
+  }
+}
+
+function normalizeActivityType(value: unknown): ActivityType | null {
+  return typeof value === 'string' && activityTypeValues.has(value as ActivityType) ? (value as ActivityType) : null;
 }
 
 function normalizeExclusionReason(value: unknown): ExclusionReason | null {
@@ -554,23 +638,6 @@ function formatOptionalBytes(v: number | null | undefined): string {
   background: var(--surface-elevated);
   color: var(--text-muted);
   border-color: var(--border-default);
-}
-
-/* ── Section Label ── */
-.section-label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: var(--text-2xs-size);
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  padding: 0.75rem 1rem 0.35rem;
-}
-.section-label i {
-  font-size: var(--text-xs-size);
-  opacity: 0.7;
 }
 
 /* ── Metrics Grid ── */
@@ -711,13 +778,6 @@ function formatOptionalBytes(v: number | null | undefined): string {
   color: var(--error);
 }
 
-/* ── Info List ── */
-.info-list {
-  display: flex;
-  flex-direction: column;
-  padding: 0.25rem 0;
-}
-
 .info-list--inline {
   padding: 0 0.5rem 0.25rem;
 }
@@ -728,86 +788,18 @@ function formatOptionalBytes(v: number | null | undefined): string {
   border-top: 1px solid var(--border-subtle);
 }
 
-.info-row {
-  display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
-  padding: 0.35rem 0.9rem;
-  font-size: var(--text-sm-size);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.info-key {
-  flex: 0 0 7rem;
-  color: var(--text-muted);
-  font-size: var(--text-xs-size);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.info-val {
-  color: var(--text-secondary);
-  word-break: break-word;
-  min-width: 0;
-}
-
-.info-val--mono {
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
-  font-size: var(--text-xs-size);
-  opacity: 0.8;
-}
-
 .info-val--muted {
   color: var(--text-muted);
   font-style: italic;
   font-size: var(--text-xs-size);
 }
 
-/* ── Info Drawer ── */
-.info-drawer {
-  margin: 0.35rem 0.5rem 0;
-  border-radius: 8px;
-  border: 1px solid var(--border-default);
-  overflow: hidden;
-}
-
-.info-drawer[open] .info-drawer__chevron {
-  transform: rotate(180deg);
-}
-
-.info-drawer__chevron {
-  transition: transform 0.2s ease;
-}
-
 .info-drawer__summary {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.6rem 0.9rem;
-  font-size: var(--text-xs-size);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
-  background: var(--surface-elevated);
   transition: color 0.15s ease;
 }
 
 .info-drawer__summary:hover {
   color: var(--text-secondary);
-}
-
-.info-drawer__summary::-webkit-details-marker {
-  display: none;
-}
-.info-drawer__summary i:first-child {
-  font-size: var(--text-sm-size);
-}
-.info-drawer__summary .info-drawer__chevron {
-  margin-left: auto;
-  font-size: var(--text-xs-size);
 }
 
 /* ── Load Messages ── */

@@ -1,6 +1,6 @@
 <template>
   <div class="chart-card">
-    <div class="chart-header">
+    <div class="chart-header chart-section-header">
       <i class="bi" :class="config.icon"></i>
       {{ config.title }}
     </div>
@@ -15,6 +15,7 @@ import { buildChartOptions, hexToRgba } from '@/utils/chartTheme';
 import type { ChartPoint } from '@/utils/chartSeriesAdapter';
 import type Highcharts from 'highcharts';
 import type { TrackGraphConfig } from './trackGraphConfigs';
+import { useMeasurementSystem } from '@/composables/useMeasurementSystem';
 
 const RANGE_BAND_ALPHA = 0.16;
 const RANGE_BAND_LINE_WIDTH = 0;
@@ -50,6 +51,11 @@ type TrackGraphProps = {
 type HighchartsEl = {
   chart?: Highcharts.Chart;
 };
+type SeriesWithPointEvents = Highcharts.SeriesOptionsType & {
+  point?: {
+    events?: Highcharts.PointEventsOptionsObject;
+  };
+};
 
 defineOptions({
   name: 'TrackGraph',
@@ -64,7 +70,8 @@ const props = withDefaults(defineProps<TrackGraphProps>(), {
 const config = computed(() => props.config);
 const highchartsEl = ref<HighchartsEl | null>(null);
 const chartOptions = shallowRef<Highcharts.Options>(buildTrackGraphOptions(props.config, props.xMode, props.showRange));
-const { bindChart, setChartXMode } = useChartSync();
+const { bindChart, setChartXMode, syncPointHover } = useChartSync();
+const { measurementSystem } = useMeasurementSystem();
 let cleanupChartSync: (() => void) | undefined;
 
 /**
@@ -113,6 +120,11 @@ watch(
   },
   { deep: true }
 );
+
+watch(measurementSystem, () => {
+  rebuildChartOptions();
+  updateChart();
+});
 
 watch(
   () => props.syncEnabled,
@@ -210,9 +222,20 @@ function buildTrackGraphOptions(
   xMode: 'time' | 'distance',
   showRange: boolean
 ): Highcharts.Options {
-  const options = buildChartOptions({ ...config, xMode });
+  const baseOptions = buildChartOptions({ ...config, xMode });
+  const options: Highcharts.Options = {
+    ...baseOptions,
+    tooltip: {
+      ...baseOptions.tooltip,
+      followTouchMove: false,
+    },
+  };
   if (!shouldRenderRangeBand(config, showRange)) {
-    return options;
+    const series = (options.series ?? []) as Highcharts.SeriesOptionsType[];
+    return {
+      ...options,
+      series: series.map((series, index) => (index === 0 ? withTrackSyncPointEvents(series) : series)),
+    };
   }
 
   const bandColor = hexToRgba(config.seriesColor, RANGE_BAND_ALPHA);
@@ -223,7 +246,7 @@ function buildTrackGraphOptions(
       type: 'line',
     },
     series: [
-      {
+      withTrackSyncPointEvents({
         type: 'line',
         name: config.seriesName,
         data: [],
@@ -236,7 +259,7 @@ function buildTrackGraphOptions(
           states: { hover: { enabled: true, radius: 3, lineWidth: 0 } },
         },
         states: { hover: { lineWidthPlus: 0 } },
-      },
+      }),
       {
         type: 'arearange',
         name: `${config.seriesName} range`,
@@ -252,6 +275,23 @@ function buildTrackGraphOptions(
       },
     ] as Highcharts.SeriesOptionsType[],
   };
+}
+
+function withTrackSyncPointEvents(series: Highcharts.SeriesOptionsType): Highcharts.SeriesOptionsType {
+  const pointSeries = series as SeriesWithPointEvents;
+  return {
+    ...pointSeries,
+    point: {
+      ...pointSeries.point,
+      events: {
+        ...pointSeries.point?.events,
+        mouseOver(this: Highcharts.Point) {
+          if (!props.syncEnabled) return;
+          syncPointHover(this);
+        },
+      },
+    },
+  } as Highcharts.SeriesOptionsType;
 }
 
 function toMillis(ts: ChartPoint['pointTimestamp']): number {
@@ -276,19 +316,7 @@ function toMillis(ts: ChartPoint['pointTimestamp']): number {
 }
 
 .chart-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: var(--text-xs-size);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
   padding: 1.25rem 1rem 0.1rem;
-}
-
-.chart-header i {
-  font-size: var(--text-sm-size);
 }
 
 .chart {

@@ -1,5 +1,5 @@
 <template>
-  <div class="track-browser-table" :class="compact ? '' : 'panel-scroll'">
+  <div class="track-browser-table">
     <!-- Mobile: card list -->
     <div v-if="compact" class="track-browser-cards">
       <!-- Sort bar -->
@@ -133,7 +133,7 @@
         scroll-height="flex"
         class="p-datatable-sm track-browser-table__datatable"
         paginator
-        :rows="25"
+        :rows="pageSize"
         :rows-per-page-options="[10, 25, 50, 100, 250, 1000]"
         removable-sort
         :sort-field="desktopSortField ?? undefined"
@@ -160,7 +160,14 @@
           />
         </template>
 
-        <Column header="" style="width: 3.5rem; min-width: 3.5rem; max-width: 3.5rem">
+        <Column
+          header=""
+          style="
+            width: var(--track-table-shape-column-width);
+            min-width: var(--track-table-shape-column-width);
+            max-width: var(--track-table-shape-column-width);
+          "
+        >
           <template #body="slotProps">
             <TrackShapePreview
               v-tooltip.top="{ value: 'Center on map', showDelay: 600 }"
@@ -174,13 +181,13 @@
           </template>
         </Column>
 
-        <Column field="startDate" header="Start" sortable style="min-width: 10rem">
+        <Column field="startDate" header="Start" sortable style="min-width: var(--track-table-date-column-width)">
           <template #body="slotProps">
             {{ formatDateAndTimeValue(slotProps.data.startDate) }}
           </template>
         </Column>
 
-        <Column field="displayName" header="Track" sortable style="min-width: 16rem">
+        <Column field="displayName" header="Track" sortable style="min-width: var(--track-table-name-column-width)">
           <template #body="slotProps">
             <div class="track-browser-table__name-cell">
               <span>{{ slotProps.data.displayName }}</span>
@@ -203,13 +210,24 @@
           </template>
         </Column>
 
-        <Column field="activityType" header="Activity" sortable style="min-width: 8rem">
+        <Column
+          field="activityType"
+          header="Activity"
+          sortable
+          style="min-width: var(--track-table-activity-column-width)"
+        >
           <template #body="slotProps">
             <ActivityTypeBadge v-if="slotProps.data.activityType" :type="slotProps.data.activityType" size="xs" />
           </template>
         </Column>
 
-        <Column field="trackLengthInMeter" header="Distance" sortable class="number-column" style="min-width: 8rem">
+        <Column
+          field="trackLengthInMeter"
+          header="Distance"
+          sortable
+          class="number-column"
+          style="min-width: var(--track-table-number-column-width)"
+        >
           <template #body="slotProps">
             <span
               v-tooltip.top="{ value: formatDistanceTooltip(slotProps.data.trackLengthInMeter || 0), showDelay: 400 }"
@@ -219,7 +237,13 @@
           </template>
         </Column>
 
-        <Column field="durationMillis" header="Duration" sortable class="number-column" style="min-width: 8rem">
+        <Column
+          field="durationMillis"
+          header="Duration"
+          sortable
+          class="number-column"
+          style="min-width: var(--track-table-duration-column-width)"
+        >
           <template #body="slotProps">
             <span v-tooltip.top="{ value: formatDurationTooltip(slotProps.data.durationMillis || 0), showDelay: 400 }">
               {{ formatDurationSmart(slotProps.data.durationMillis || 0) }}
@@ -227,13 +251,24 @@
           </template>
         </Column>
 
-        <Column field="avgSpeedKmh" header="Avg km/h" sortable class="number-column" style="min-width: 7rem">
+        <Column
+          field="avgSpeedKmh"
+          :header="`Avg ${currentMeasurementUnit('speed')}`"
+          sortable
+          class="number-column"
+          style="min-width: var(--track-table-compact-number-column-width)"
+        >
           <template #body="slotProps">
             {{ formatSpeed(slotProps.data.avgSpeedKmh) }}
           </template>
         </Column>
 
-        <Column field="energyNetTotalWh" sortable class="number-column" style="min-width: 7rem">
+        <Column
+          field="energyNetTotalWh"
+          sortable
+          class="number-column"
+          style="min-width: var(--track-table-compact-number-column-width)"
+        >
           <template #header>
             <span>Energy</span>
             <button
@@ -250,12 +285,18 @@
           </template>
         </Column>
 
-        <Column field="explorationScore" header="Exploration" sortable class="number-column" style="min-width: 7rem">
+        <Column
+          field="explorationScore"
+          header="Exploration"
+          sortable
+          class="number-column"
+          style="min-width: var(--track-table-exploration-column-width)"
+        >
           <template #body="slotProps">
             <span
               v-if="slotProps.data.explorationScore != null"
               v-tooltip.top="{
-                value: 'Share of this track covering new ground (not within 25m of any prior track)',
+                value: `Share of this track covering new ground (not within ${formatDistance(EXPLORATION_CORRIDOR_WIDTH_M, 0)} of any prior track)`,
                 showDelay: 300,
               }"
             >
@@ -272,7 +313,7 @@
           </template>
         </Column>
 
-        <Column field="createDate" header="Imported" sortable style="min-width: 10rem">
+        <Column field="createDate" header="Imported" sortable style="min-width: var(--track-table-date-column-width)">
           <template #body="slotProps">
             <span :title="slotProps.data.indexedFile?.name || undefined">
               {{ formatDateAndTimeValue(slotProps.data.createDate) }}
@@ -293,15 +334,22 @@ import { computed, ref, watch } from 'vue';
 import {
   formatDateAndTime,
   formatNumber,
+  formatDistance,
   formatDistanceSmart,
   formatDurationSmart,
   formatDistanceTooltip,
   formatDurationTooltip,
+  currentMeasurementUnit,
 } from '@/utils/Utils';
+import { getMeasurementSystem } from '@/composables/useMeasurementSystem';
+import { speedDisplayValue } from '@/utils/units';
 import { curationBadges } from '@/utils/statisticsCuration';
 import type { TrackRowViewModel } from './trackBrowser.types';
 import TrackShapePreview from '@/components/ui/TrackShapePreview.vue';
 import ActivityTypeBadge from '@/components/ui/ActivityTypeBadge.vue';
+import type { TrackSelectionEvents } from '@/components/filter/filterEvents';
+
+const EXPLORATION_CORRIDOR_WIDTH_M = 25;
 
 const props = defineProps<{
   rows: TrackRowViewModel[];
@@ -311,10 +359,7 @@ const props = defineProps<{
   sortResetKey?: number;
 }>();
 
-const emit = defineEmits<{
-  (event: 'select-track', value: number | string): void;
-  (event: 'open-details', value: number | string): void;
-}>();
+const emit = defineEmits<TrackSelectionEvents>();
 
 const mobilePageSize = 20;
 const mobilePage = ref(0);
@@ -449,7 +494,7 @@ function formatDateAndTimeValue(value: Date | null | undefined) {
 }
 
 function formatSpeed(value: number | null) {
-  return value == null ? '' : formatNumber(value, 1);
+  return value == null ? '—' : formatNumber(speedDisplayValue(value, getMeasurementSystem()), 1);
 }
 
 function formatEnergy(value: number | null) {
@@ -467,38 +512,61 @@ function showEnergyInfo(event: Event) {
 
 <style scoped>
 .track-browser-table {
+  --track-table-shape-column-width: 3rem;
+  --track-table-date-column-width: 8rem;
+  --track-table-name-column-width: 10.5rem;
+  --track-table-activity-column-width: 6rem;
+  --track-table-number-column-width: 5.5rem;
+  --track-table-duration-column-width: 6rem;
+  --track-table-compact-number-column-width: 5rem;
+  --track-table-exploration-column-width: 6rem;
+
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
   padding: 0 var(--dlg-padding) 1rem;
 }
 
-/* ---- Always-visible horizontal scrollbar ---- */
-.track-browser-table__datatable :deep(.p-datatable-wrapper) {
-  overflow-x: auto !important;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
+.track-browser-table__datatable {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
 }
 
-/* Force scrollbar to always show (WebKit / Blink) */
-.track-browser-table__datatable :deep(.p-datatable-wrapper)::-webkit-scrollbar {
-  height: 10px;
+/* PrimeVue 4 uses .p-datatable-table-container; keep the older class for compatibility. */
+.track-browser-table__datatable :deep(:is(.p-datatable-table-container, .p-datatable-wrapper)) {
+  min-height: 0;
+  overflow: auto !important;
+  scrollbar-color: var(--text-muted) var(--surface-glass-heavy);
+  scrollbar-width: thin;
 }
-.track-browser-table__datatable :deep(.p-datatable-wrapper)::-webkit-scrollbar-track {
+
+.track-browser-table__datatable :deep(:is(.p-datatable-table-container, .p-datatable-wrapper))::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+.track-browser-table__datatable
+  :deep(:is(.p-datatable-table-container, .p-datatable-wrapper))::-webkit-scrollbar-track {
   background: var(--surface-glass-heavy);
   border-radius: 5px;
 }
-.track-browser-table__datatable :deep(.p-datatable-wrapper)::-webkit-scrollbar-thumb {
+.track-browser-table__datatable
+  :deep(:is(.p-datatable-table-container, .p-datatable-wrapper))::-webkit-scrollbar-thumb {
   background: var(--text-muted);
   border-radius: 5px;
   min-height: 30px;
 }
-.track-browser-table__datatable :deep(.p-datatable-wrapper)::-webkit-scrollbar-thumb:hover {
+.track-browser-table__datatable
+  :deep(:is(.p-datatable-table-container, .p-datatable-wrapper))::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
 }
 
-/* Firefox: force always-visible scrollbar */
-.track-browser-table__datatable :deep(.p-datatable-wrapper) {
-  scrollbar-width: auto;
-  scrollbar-color: var(--text-muted) var(--surface-glass-heavy);
+.track-browser-table__datatable :deep(.p-paginator) {
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .track-browser-table__datatable :deep(.p-datatable-thead) {
@@ -760,37 +828,12 @@ function showEnergyInfo(event: Event) {
   gap: 0.25rem;
 }
 
-.track-browser-table__info-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: var(--text-2xs-size);
-  line-height: var(--text-2xs-lh);
-  transition: color 0.15s;
-}
-
-.track-browser-table__info-btn:hover,
-.track-browser-table__info-btn:focus-visible {
-  color: var(--accent-muted);
-  outline: none;
-}
-
 .track-browser-table__header-info {
   margin-left: 0.2rem;
 }
 
 .track-browser-table__info-text {
   max-width: min(240px, calc(100vw - 2rem));
-  font-size: var(--text-xs-size);
-  line-height: var(--text-xs-lh);
-  color: var(--text-secondary);
-  margin: 0;
-  padding: 0.1rem 0;
 }
 
 .track-browser-card__desc {

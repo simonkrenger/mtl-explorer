@@ -3,7 +3,9 @@ const STORAGE_KEY_PREFIX = 'mtl.';
 export const STORAGE_KEYS = {
   jwt: 'mtl.jwt',
   colorScheme: 'mtl.color-scheme',
+  mediaViewerTheme: 'mtl.media-viewer.theme',
   locale: 'mtl.locale',
+  measurementSystem: 'mtl.measurement-system',
   mapSettings: 'mtl.map.settings',
   trackDetailsPreferences: 'mtl.track-details.preferences',
   mapConfigCache: 'mtl.map.config-cache',
@@ -11,9 +13,11 @@ export const STORAGE_KEYS = {
   backgroundCacheVersion: 'mtl.backgrounds.cache-version',
   startupCrashGuard: 'mtl.startup.crash-guard',
   dataFreshnessAppliedToken: 'mtl.data-freshness.applied-token',
-  dataFreshnessDismissedToken: 'mtl.data-freshness.dismissed-token',
-  dataFreshnessDismissedExpiresAt: 'mtl.data-freshness.dismissed-expires-at',
+  dataFreshnessSnoozedUntil: 'mtl.data-freshness.snoozed-until',
   clientFilterConfig: 'mtl.filter.client-config',
+  filterPaused: 'mtl.filter.paused',
+  filterPausedDraft: 'mtl.filter.paused-draft',
+  filterScopeHelpSeen: 'mtl.filter.scope-help-seen',
 } as const satisfies Record<string, `mtl.${string}`>;
 
 export type AppStorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];

@@ -1,8 +1,8 @@
 package com.x8ing.mtl.server.mtlserver.db.repository.logs;
 
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import com.x8ing.mtl.server.mtlserver.db.entity.logs.WebClientEnvironmentLog;
 import com.x8ing.mtl.server.mtlserver.web.services.analytics.ClientEnvironmentRequest;
 import org.springframework.stereotype.Service;
@@ -11,6 +11,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Date;
 import java.util.List;
+
+import static org.apache.commons.lang3.StringUtils.truncate;
 
 @Service
 @JsonPropertyOrder({
@@ -74,7 +76,7 @@ public class WebClientEnvironmentLogService {
     private String toJson(ClientEnvironmentRequest request) {
         try {
             return objectMapper.writeValueAsString(request);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             return null;
         }
     }
@@ -86,8 +88,4 @@ public class WebClientEnvironmentLogService {
         return second;
     }
 
-    private static String truncate(String value, int maxLength) {
-        if (value == null) return null;
-        return value.length() <= maxLength ? value : value.substring(0, maxLength);
-    }
 }

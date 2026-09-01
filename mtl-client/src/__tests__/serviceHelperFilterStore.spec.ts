@@ -6,15 +6,32 @@ const mocks = vi.hoisted(() => {
     get: vi.fn(),
     post: vi.fn(),
   };
+  const tracksApi = {
+    getTracksSimplified1: vi.fn(),
+    getTrackMediaOptionsWithinDistanceOfPoint: vi.fn(),
+  };
   const getActiveFilterRequest = vi.fn();
   const useFilterStore = vi.fn(() => ({ getActiveFilterRequest }));
   const loadClientFilterConfig = vi.fn();
+  const loadActiveFilterRequest = vi.fn(async () => {
+    try {
+      return await useFilterStore().getActiveFilterRequest();
+    } catch {
+      const config = await loadClientFilterConfig();
+      return {
+        filterName: config.filterInfo?.filterConfig?.filterName ?? '',
+        filterParams: config.filterParams,
+      };
+    }
+  });
 
   return {
     apiClient,
+    tracksApi,
     getActiveFilterRequest,
     useFilterStore,
     loadClientFilterConfig,
+    loadActiveFilterRequest,
   };
 });
 
@@ -22,8 +39,32 @@ vi.mock('@/utils/apiClient', () => ({
   apiClient: mocks.apiClient,
 }));
 
+vi.mock('x8ing-mtl-api-typescript-fetch', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('x8ing-mtl-api-typescript-fetch')>();
+  return {
+    ...actual,
+    TracksControllerApi: vi.fn(function () {
+      return mocks.tracksApi;
+    }),
+    FilterControllerApi: vi.fn(function () {
+      return {};
+    }),
+    ConfigControllerApi: vi.fn(function () {
+      return {};
+    }),
+    EnergyControllerApi: vi.fn(function () {
+      return {};
+    }),
+  };
+});
+
+vi.mock('@/utils/openApiClient', () => ({
+  getApiConfiguration: vi.fn(() => ({})),
+}));
+
 vi.mock('@/stores/filterStore', () => ({
   useFilterStore: mocks.useFilterStore,
+  loadActiveFilterRequest: mocks.loadActiveFilterRequest,
 }));
 
 vi.mock('@/components/filter/FilterService', () => ({
@@ -39,16 +80,21 @@ vi.mock('@/utils/safeLogging', () => ({
 import { FilterService } from '@/components/filter/FilterService';
 import {
   fetchStatistics,
+  fetchStatisticsOverview,
   fetchTrackDetailsForCrossingPoints,
   fetchTrackIdsWithinDistanceOfPoint,
+  fetchTrackMediaOptionsWithinDistanceOfPoint,
+  getRelatedTracks,
 } from '@/utils/ServiceHelper';
 
-function filterRequest(filterName: string): ActiveFilterRequest {
+function filterRequest(filterName: string, resolvedTrackIds: number[] | undefined = [101, 102]): ActiveFilterRequest {
   return {
     filterName,
+    resolvedTrackIds,
     filterParams: {
       stringParams: { ACTIVITY: 'bike' },
       dateTimeParams: { DATE_TIME_FROM: '2026-01-01T00:00:00' },
+      resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
     },
   };
 }
@@ -57,11 +103,18 @@ describe('ServiceHelper active filter resolution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.apiClient.post.mockResolvedValue({ data: [] });
+    mocks.tracksApi.getTracksSimplified1.mockResolvedValue({
+      trackVersions: { 21: 1, 22: 1 },
+      standardFilterCount: 2,
+    });
     mocks.getActiveFilterRequest.mockResolvedValue(filterRequest('StoreFilter'));
     mocks.useFilterStore.mockReturnValue({ getActiveFilterRequest: mocks.getActiveFilterRequest });
     mocks.loadClientFilterConfig.mockResolvedValue({
       filterInfo: { filterConfig: { filterName: 'LegacyFilter' } },
-      filterParams: { stringParams: { ACTIVITY: 'run' } },
+      filterParams: {
+        stringParams: { ACTIVITY: 'run' },
+        geoRectangles: { GEO_RECTANGLE_1: { minLat: 46, minLng: 7, maxLat: 47, maxLng: 8 } },
+      },
     });
   });
 
@@ -71,12 +124,23 @@ describe('ServiceHelper active filter resolution', () => {
     expect(mocks.useFilterStore).toHaveBeenCalledOnce();
     expect(mocks.getActiveFilterRequest).toHaveBeenCalledOnce();
     expect(FilterService.loadClientFilterConfig).not.toHaveBeenCalled();
+    expect(mocks.tracksApi.getTracksSimplified1).not.toHaveBeenCalled();
     expect(mocks.apiClient.post).toHaveBeenCalledWith(
-      'api/tracks/get-track-statistics?groupByDateFormat=yyyy-MM&filterName=StoreFilter',
-      {
-        ACTIVITY: 'bike',
-        DATE_TIME_FROM: '2026-01-01T00:00:00',
-      }
+      'api/tracks/get-track-statistics?groupByDateFormat=yyyy-MM',
+      [101, 102],
+      { signal: undefined }
+    );
+  });
+
+  it('sends the measurement system for semantic overview milestones', async () => {
+    mocks.apiClient.post.mockResolvedValueOnce({ data: { measurementSystem: 'US_CUSTOMARY', milestones: [] } });
+
+    await fetchStatisticsOverview('US_CUSTOMARY');
+
+    expect(mocks.apiClient.post).toHaveBeenCalledWith(
+      'api/tracks/get-track-overview?measurementSystem=US_CUSTOMARY',
+      [101, 102],
+      { signal: undefined }
     );
   });
 
@@ -89,11 +153,48 @@ describe('ServiceHelper active filter resolution', () => {
     expect(mocks.apiClient.post).toHaveBeenCalledWith(
       'api/tracks/get-track-ids-within-distance-of-point?filterName=StoreFilter&longitude=7.4&latitude=46.9&distanceInMeter=250',
       {
-        ACTIVITY: 'bike',
-        DATE_TIME_FROM: '2026-01-01T00:00:00',
+        stringParams: { ACTIVITY: 'bike' },
+        dateTimeParams: { DATE_TIME_FROM: '2026-01-01T00:00:00' },
+        resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
       },
       { signal: undefined }
     );
+  });
+
+  it('uses the generated client for nearby track media counts and distances', async () => {
+    mocks.tracksApi.getTrackMediaOptionsWithinDistanceOfPoint.mockResolvedValueOnce([
+      { trackId: 42, distanceMeters: 18, matchedMediaCount: 3 },
+    ]);
+
+    await expect(fetchTrackMediaOptionsWithinDistanceOfPoint(7.4, 46.9, 250)).resolves.toEqual([
+      { trackId: 42, distanceMeters: 18, matchedMediaCount: 3 },
+    ]);
+    expect(mocks.tracksApi.getTrackMediaOptionsWithinDistanceOfPoint).toHaveBeenCalledWith(
+      {
+        longitude: 7.4,
+        latitude: 46.9,
+        distanceInMeter: 250,
+        filterName: 'StoreFilter',
+        filterParamsRequest: {
+          stringParams: { ACTIVITY: 'bike' },
+          dateTimeParams: { DATE_TIME_FROM: '2026-01-01T00:00:00' },
+          resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
+        },
+      },
+      { signal: undefined }
+    );
+  });
+
+  it('sends the typed selection for related-track resolution', async () => {
+    mocks.apiClient.post.mockResolvedValueOnce({ data: {} });
+
+    await getRelatedTracks(55);
+
+    expect(mocks.apiClient.post).toHaveBeenCalledWith('api/tracks/related/55?filterName=StoreFilter', {
+      stringParams: { ACTIVITY: 'bike' },
+      dateTimeParams: { DATE_TIME_FROM: '2026-01-01T00:00:00' },
+      resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
+    });
   });
 
   it('falls back to FilterService when the filter store is unavailable', async () => {
@@ -104,9 +205,21 @@ describe('ServiceHelper active filter resolution', () => {
     await fetchStatistics('yyyy');
 
     expect(FilterService.loadClientFilterConfig).toHaveBeenCalledOnce();
+    expect(mocks.tracksApi.getTracksSimplified1).toHaveBeenCalledWith(
+      {
+        mode: 'ids',
+        filterName: 'LegacyFilter',
+        filterParamsRequest: {
+          stringParams: { ACTIVITY: 'run' },
+          geoRectangles: { GEO_RECTANGLE_1: { minLat: 46, minLng: 7, maxLat: 47, maxLng: 8 } },
+        },
+      },
+      { signal: undefined }
+    );
     expect(mocks.apiClient.post).toHaveBeenCalledWith(
-      'api/tracks/get-track-statistics?groupByDateFormat=yyyy&filterName=LegacyFilter',
-      { ACTIVITY: 'run' }
+      'api/tracks/get-track-statistics?groupByDateFormat=yyyy',
+      [21, 22],
+      { signal: undefined }
     );
   });
 
@@ -151,13 +264,22 @@ describe('ServiceHelper active filter resolution', () => {
       },
     });
 
-    const result = await fetchTrackDetailsForCrossingPoints(
-      [{ name: 'A', coordinate: { x: 8.5, y: 47.5 } }],
-      30
-    );
+    const result = await fetchTrackDetailsForCrossingPoints([{ name: 'A', coordinate: { x: 8.5, y: 47.5 } }], 30);
 
     const point = result.crossings?.['1']?.crossings?.[0]?.gpsTrackDataPoint?.pointLongLat?.coordinates;
     expect(point).toEqual([8.5, 47.5, 430]);
     expect(typeof point?.[0]).toBe('number');
+    expect(mocks.apiClient.post).toHaveBeenCalledWith(
+      'api/tracks/get-track-details-for-tracks-crossing-points',
+      expect.objectContaining({
+        filter: {
+          filterName: 'StoreFilter',
+          params: expect.objectContaining({
+            resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
+          }),
+        },
+      }),
+      { signal: undefined }
+    );
   });
 });

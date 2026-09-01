@@ -4,7 +4,7 @@
     <Transition name="curtain">
       <div
         v-if="showCurtain"
-        class="curtain-wrapper"
+        class="curtain-wrapper splash-viewport"
         :class="{ 'has-captured-logo-position': capturedLogoTop !== null }"
         :style="curtainStyle"
       >
@@ -13,12 +13,13 @@
         <span class="photo-credit">© Patrick Heusser</span>
         <div class="curtain-content">
           <img :src="logoSvg" class="photo-logo" alt="MTL Explorer" />
-          <div v-if="!loadFailed" class="photo-loader">
+          <div v-if="!startupError" class="photo-loader">
             <p class="photo-status">{{ currentSplashMessage }}<span class="photo-dots"></span></p>
             <div class="photo-progress-track"><div class="photo-progress-bar"></div></div>
           </div>
           <div v-else class="curtain-error">
-            <p>Unable to load tracks — no server connection and no cached data available.</p>
+            <p v-if="loadFailed">Unable to load tracks — no server connection and no cached data available.</p>
+            <p v-else>Track loading is taking longer than expected. Check the server connection and retry.</p>
             <Button label="Retry" icon="bi bi-arrow-clockwise" class="p-button-danger mt-3" @click="retryLoad" />
           </div>
         </div>
@@ -57,6 +58,7 @@ import logoSvg from '@/assets/logo/logo3/mtl-logo-3_vector.svg';
 import { clearSplashLogoTop, consumeSplashLogoTop } from '@/utils/splashLogoPosition';
 
 const MINIMUM_SPLASH_MS = 1500;
+const MAXIMUM_SPLASH_MS = 12_000;
 const SPLASH_MESSAGE_INTERVAL_MS = 2000;
 const FROM_LOGIN_KEY = 'mtl.from-login';
 const SPLASH_MESSAGES = [
@@ -69,12 +71,14 @@ const SPLASH_MESSAGES = [
 
 const showCurtain = ref(true);
 const loadFailed = ref(false);
+const loadTimedOut = ref(false);
 const syncing = ref(false);
 const bgImage = getRandomBackground();
 const fromLogin = ref(sessionStorage.getItem(FROM_LOGIN_KEY) === '1');
 const capturedLogoTop = ref(fromLogin.value ? consumeSplashLogoTop() : null);
 const currentSplashMessageIndex = ref(0);
 const currentSplashMessage = computed(() => SPLASH_MESSAGES[currentSplashMessageIndex.value]);
+const startupError = computed(() => loadFailed.value || loadTimedOut.value);
 const curtainStyle = computed<CSSProperties | undefined>(() => {
   if (capturedLogoTop.value === null) return undefined;
   return { '--splash-content-top': `${capturedLogoTop.value}px` } as CSSProperties;
@@ -82,17 +86,20 @@ const curtainStyle = computed<CSSProperties | undefined>(() => {
 
 let curtainShownAt = 0;
 let splashMessageTimer: ReturnType<typeof setInterval> | null = null;
+let splashFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(() => {
   curtainShownAt = performance.now();
   sessionStorage.removeItem(FROM_LOGIN_KEY);
   if (!fromLogin.value) clearSplashLogoTop();
   startSplashMessages();
+  splashFallbackTimer = setTimeout(showStartupTimeout, MAXIMUM_SPLASH_MS);
   startupLog('curtain', 'Home view mounted; curtain visible', { fromLogin: fromLogin.value });
 });
 
 onUnmounted(() => {
   stopSplashMessages();
+  stopSplashFallbackTimer();
 });
 
 function startSplashMessages() {
@@ -113,12 +120,32 @@ function stopSplashMessages() {
   splashMessageTimer = null;
 }
 
+function stopSplashFallbackTimer() {
+  if (!splashFallbackTimer) return;
+  clearTimeout(splashFallbackTimer);
+  splashFallbackTimer = null;
+}
+
 function hideCurtain() {
   showCurtain.value = false;
+  stopSplashMessages();
+  stopSplashFallbackTimer();
+}
+
+function showStartupTimeout() {
+  splashFallbackTimer = null;
+  if (!showCurtain.value || loadFailed.value) return;
+  startupWarn('curtain', 'Startup curtain timed out; showing retry state');
+  loadTimedOut.value = true;
   stopSplashMessages();
 }
 
 function onTracksLoaded() {
+  if (loadFailed.value) {
+    startupWarn('curtain', 'tracks-loaded received after load-failed; keeping startup error visible');
+    return;
+  }
+  loadTimedOut.value = false;
   const elapsed = performance.now() - curtainShownAt;
   const remaining = Math.max(0, MINIMUM_SPLASH_MS - elapsed);
   startupLog('curtain', 'tracks-loaded received', { elapsedMs: Math.round(elapsed), delayMs: Math.round(remaining) });
@@ -134,6 +161,7 @@ function onTracksLoaded() {
 function onLoadFailed() {
   startupWarn('curtain', 'load-failed received; showing startup error state');
   loadFailed.value = true;
+  showCurtain.value = true;
   stopSplashMessages();
 }
 
@@ -174,13 +202,7 @@ function retryLoad() {
   width: 100%;
   height: 100%;
   height: var(--splash-viewport-height);
-  box-sizing: border-box;
   z-index: 9999;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
 .curtain-wrapper.has-captured-logo-position {
@@ -205,6 +227,7 @@ function retryLoad() {
 /* Curtain exit — fade into the map */
 .curtain-leave-active {
   transition: opacity 0.6s ease;
+  pointer-events: none;
 }
 .curtain-leave-to {
   opacity: 0;
@@ -255,14 +278,5 @@ function retryLoad() {
   100% {
     transform: translateX(350%);
   }
-}
-
-.bar-fade-enter-active,
-.bar-fade-leave-active {
-  transition: opacity 0.3s ease;
-}
-.bar-fade-enter-from,
-.bar-fade-leave-to {
-  opacity: 0;
 }
 </style>

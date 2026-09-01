@@ -1,12 +1,6 @@
 <template>
   <div class="container">
-    <!-- Base map: base tiles only. CSS filter (grayscale + brightness) applied here to dim
-         the base independently of overlays, which live on the overlay map above. -->
-    <div ref="mapBaseContainer" class="map-base" :style="baseMapStyle"></div>
-
-    <!-- Overlay map: Swiss Mobility overlays, tracks, highlights, heatmap, media —
-         always full color, transparent background. -->
-    <div ref="mapOverlayContainer" class="map-overlay"></div>
+    <div ref="mapContainer" class="map"></div>
 
     <!-- ─── Navigation sheet (bottom bar mobile / left panel desktop) ─── -->
     <NavigationSheet
@@ -95,6 +89,9 @@
       :selected-track-id="selectedFeature?.properties?.id ?? null"
       @select-track="onTrackBrowserSelect"
       @open-details="onTrackBrowserOpenDetails"
+      @open-track-photos="onTrackBrowserOpenPhotos"
+      @open-media-on-map="openMediaFromStatisticsOnMainMap"
+      @open-filter="onNavigationToolSelect('filter')"
       @tool-opened="onToolOpened('statistics')"
       @tool-closed="onToolClosed"
     />
@@ -112,6 +109,8 @@
       :visible-track-count="visibleTrackCount"
       @filter-applied-event="onFilterApplied"
       @filter-style-changed="onFilterStyleChanged"
+      @select-track="onTrackBrowserSelect"
+      @open-details="onTrackBrowserOpenDetails"
       @tool-opened="onToolOpened('filterTool')"
       @tool-closed="onToolClosed"
       @start-geo-drawing="onStartGeoDrawing"
@@ -129,6 +128,7 @@
         :visible-track-count="visibleTrackCount"
         :total-track-count="totalTrackCount"
         :filter-active="filterActive"
+        :active-filter-identity="activeFilterIdentity"
         :hidden-groups="hiddenGroups"
         @update:collapsed="onLegendCollapsed"
         @update:hidden-groups="onHiddenGroupsChanged"
@@ -155,6 +155,13 @@
       <div v-if="isOffline" class="mtl-offline"><i class="bi bi-wifi-off"></i> Offline — displaying cached tracks</div>
     </transition>
 
+    <MapConfigFallbackNotice
+      v-if="showMapConfigFallbackNotice"
+      :retrying="mapConfigRetrying"
+      @retry="retryMapConfig"
+      @dismiss="mapConfigFallbackDismissed = true"
+    />
+
     <!-- ─── Map download banner ─── -->
     <transition name="fade">
       <div v-if="mapServerStatus && !mapServerStatus.ready" class="mtl-map-downloading">
@@ -169,48 +176,50 @@
           }}</span>
         </div>
         <div
-          v-if="mapServerStatus.phase === 'downloading' && mapServerStatus.download_total > 0"
+          v-if="mapServerStatus.phase === 'downloading' && (mapServerStatus.downloadTotal ?? 0) > 0"
           class="mtl-map-downloading-progress"
         >
           <div class="mtl-map-downloading-bar-track">
-            <div class="mtl-map-downloading-bar-fill" :style="{ width: mapServerStatus.download_pct + '%' }"></div>
+            <div class="mtl-map-downloading-bar-fill" :style="{ width: mapServerStatus.downloadPct + '%' }"></div>
           </div>
-          <span class="mtl-map-downloading-pct">{{ mapServerStatus.download_pct }}%</span>
+          <span class="mtl-map-downloading-pct">{{ mapServerStatus.downloadPct }}%</span>
         </div>
         <div v-if="mapServerStatus.message" class="mtl-map-downloading-msg">{{ mapServerStatus.message }}</div>
       </div>
     </transition>
 
     <!-- ─── Data freshness banner ─── -->
-    <transition name="fade">
-      <div v-if="showDataFreshnessBanner" class="mtl-data-freshness">
-        <div class="mtl-data-freshness__content">
-          <i class="bi bi-arrow-repeat"></i>
-          <div class="mtl-data-freshness__text">
-            <div class="mtl-data-freshness__title">New data available</div>
-            <div class="mtl-data-freshness__detail">Tracks, media, or settings changed since this view loaded.</div>
+    <Teleport to="body">
+      <transition name="fade">
+        <div v-if="showDataFreshnessBanner" class="mtl-data-freshness">
+          <div class="mtl-data-freshness__content">
+            <i class="bi bi-arrow-repeat"></i>
+            <div class="mtl-data-freshness__text">
+              <div class="mtl-data-freshness__title">New data available</div>
+              <div class="mtl-data-freshness__detail">Tracks, media, or settings changed since this view loaded.</div>
+            </div>
+          </div>
+          <div class="mtl-data-freshness__actions">
+            <button
+              class="mtl-data-freshness__btn mtl-data-freshness__btn--primary"
+              :disabled="freshnessReloading"
+              @click="onMapFreshnessBrowserReload"
+            >
+              <i class="bi bi-arrow-clockwise"></i>
+              <span>Reload</span>
+            </button>
+            <button
+              type="button"
+              class="mtl-data-freshness__btn"
+              :disabled="freshnessReloading"
+              @click="onDataFreshnessDismiss"
+            >
+              Dismiss
+            </button>
           </div>
         </div>
-        <div class="mtl-data-freshness__actions">
-          <button
-            class="mtl-data-freshness__btn mtl-data-freshness__btn--primary"
-            :disabled="freshnessReloading"
-            @click="onMapFreshnessBrowserReload"
-          >
-            <i class="bi bi-arrow-clockwise"></i>
-            <span>Reload</span>
-          </button>
-          <button
-            type="button"
-            class="mtl-data-freshness__btn"
-            :disabled="freshnessReloading"
-            @click="onDataFreshnessDismiss(serverFreshnessToken)"
-          >
-            Dismiss
-          </button>
-        </div>
-      </div>
-    </transition>
+      </transition>
+    </Teleport>
 
     <!-- ─── Track details bottom sheet ─── -->
     <BottomSheet
@@ -220,14 +229,14 @@
       :selected-detent="trackDetailsSelectedDetent"
       :background-detent="trackDetailsBackgroundDetent"
       :z-index="5300"
-      @closed="onTrackDetailsSheetClosed"
+      @closed="onTrackDetailsSheetClosedAfterTransition"
     >
       <template #title>
         <div class="td-sheet-header">
           <span class="td-title-label"
             ><i class="bi bi-info-circle"></i><span class="td-title-text">Track Details</span></span
           >
-          <span v-if="trackDetailsInfo.id" class="td-sheet-id" @pointerdown.stop @mousedown.stop @touchstart.stop
+          <span v-if="trackDetailsInfo.id" class="td-sheet-id" title="Select TrackID to copy" @click.stop
             >#{{ trackDetailsInfo.id }}</span
           >
           <ActivityTypeBadge
@@ -242,10 +251,12 @@
       <TrackDetails
         v-if="trackDetailsId != null"
         :gps-track-id="trackDetailsId"
-        @back-to-map="closeTrackDetailsFromPanel"
+        :initial-tab="trackDetailsInitialTab"
+        @back="closeTrackDetailsFromPanel"
         @track-loaded="onTrackDetailsLoaded"
         @navigate-track="syncTrackDetailRoute"
         @start-3d-replay="start3dTrackReplay"
+        @open-media-on-map="openTrackMediaOnMainMap"
       />
     </BottomSheet>
 
@@ -277,6 +288,35 @@
       @recenter="recenter3dTrackReplayCamera"
     />
 
+    <!-- ─── Media collection chooser ─── -->
+    <BottomSheet
+      v-model="mediaSelectionSheetVisible"
+      :detents="[
+        { id: 'compact', height: '300px' },
+        { id: 'large', height: '82vh' },
+      ]"
+      initial-detent="compact"
+      fit-content-initial
+      :z-index="5100"
+      title="Open photos"
+      icon="bi bi-images"
+      header-mode="compact"
+      :no-backdrop="false"
+      desktop-width="compact"
+      sheet-class="media-collection-sheet"
+      @closed="closeMediaSelection"
+    >
+      <MediaCollectionChooser
+        v-if="mediaPendingSelection"
+        :selection="mediaPendingSelection"
+        :track-count="mediaSelectionTrackOptions.length"
+        :tracks-loading="mediaSelectionTracksLoading"
+        @choose-primary="chooseMediaCollection('primary')"
+        @choose-viewport="chooseMediaCollection('viewport')"
+        @open-activities="openMediaSelectionActivities"
+      />
+    </BottomSheet>
+
     <!-- ─── Media photo bottom sheet ─── -->
     <BottomSheet
       v-model="mediaSheetVisible"
@@ -287,21 +327,58 @@
       ]"
       initial-detent="large"
       :z-index="5050"
-      title="Photo"
+      :title="mediaViewerScopeLabel"
       icon="bi bi-image"
       header-mode="compact"
       :no-backdrop="false"
-      @closed="closeMediaSheet"
+      no-scroll-hint
+      native-fullscreen
+      viewport-centered
+      :sheet-class="['media-viewer-sheet', mediaViewerThemeClass]"
+      @closed="onMediaSheetClosed"
     >
+      <template #title>
+        <span class="media-preview-sheet-title">
+          <i class="bi bi-image" aria-hidden="true"></i>
+          <span>{{ mediaViewerScopeLabel }}</span>
+          <span class="media-preview-sheet-title__counter">
+            {{ mediaCurrentIndex >= 0 ? mediaNavOffset + mediaCurrentIndex + 1 : 0 }} of {{ mediaNavTotal }}
+          </span>
+        </span>
+      </template>
+      <template #header-actions>
+        <button
+          type="button"
+          class="media-preview-details-toggle"
+          :aria-pressed="mediaPreviewDetailsVisible"
+          @click.stop="mediaPreviewDetailsVisible = !mediaPreviewDetailsVisible"
+        >
+          <i class="bi bi-info-circle" aria-hidden="true"></i>
+          <span>Details</span>
+        </button>
+        <MediaViewerThemeToggle />
+      </template>
       <MediaPreview
         :media-id="mediaSheetMediaId"
-        :can-go-prev="mediaPrevId != null"
-        :can-go-next="mediaNextId != null"
-        :nav-index="mediaCurrentIndex >= 0 ? mediaCurrentIndex + 1 : 0"
-        :nav-total="mediaNavList.length"
-        :prefetch-ids="[mediaPrevId, mediaNextId]"
-        @prev="navigateMediaTo(mediaPrevId)"
-        @next="navigateMediaTo(mediaNextId)"
+        :collection-label="mediaViewerFilmstripLabel"
+        :can-go-prev="mediaCanGoPrev"
+        :can-go-next="mediaCanGoNext"
+        :nav-index="mediaCurrentIndex >= 0 ? mediaNavOffset + mediaCurrentIndex + 1 : 0"
+        :nav-total="mediaNavTotal"
+        :prefetch-ids="[mediaNextId, mediaPrevId]"
+        :media-ids="mediaNavigationIds"
+        :media-offset="mediaNavOffset"
+        :page-loading="mediaNavLoading"
+        :position-lat="selectedMapMediaPoint?.lat"
+        :position-lng="selectedMapMediaPoint?.lng"
+        :overview-bounds="mediaViewerOverviewBounds"
+        :details-visible="mediaPreviewDetailsVisible"
+        @prev="navigateMediaRelative(-1)"
+        @next="navigateMediaRelative(1)"
+        @select="navigateMediaTo"
+        @request-page="navigateMediaPage"
+        @update:details-visible="mediaPreviewDetailsVisible = $event"
+        @open-on-map="openSelectedMapMediaOnMainMap"
       />
     </BottomSheet>
 
@@ -315,7 +392,7 @@
       ]"
       initial-detent="compact"
       :z-index="4900"
-      :title="selectionPopupTracks.length + ' tracks — select for details'"
+      :title="trackSelectionSheetTitle"
       icon="bi bi-card-list"
       header-mode="compact"
       :no-backdrop="false"
@@ -323,31 +400,27 @@
     >
       <div class="track-selection-sheet">
         <div class="track-selection-sheet__scroll">
-          <ul class="track-selection-list">
-            <li
-              v-for="track in selectionPopupTracks"
-              :key="track.id"
-              class="mtl-track-pick"
-              @click="onPopupTrackSelect(track.id)"
-            >
-              <TrackShapePreview
-                :track-id="track.id"
-                :width="48"
-                :height="32"
-                :padding="3"
-                class="mtl-track-pick__shape"
+          <template v-if="trackSelectionPurpose === 'photos'">
+            <section v-if="selectionPopupTracksWithMedia.length > 0" class="track-selection-group">
+              <h3 class="track-selection-group__title">
+                <span><i class="bi bi-camera-fill" aria-hidden="true"></i> Activities with photos</span>
+                <span>{{ selectionPopupTracksWithMedia.length }}</span>
+              </h3>
+              <NearbyTrackList :tracks="selectionPopupTracksWithMedia" show-media-status @select="onPopupTrackSelect" />
+            </section>
+            <section v-if="selectionPopupTracksWithoutMedia.length > 0" class="track-selection-group">
+              <h3 class="track-selection-group__title">
+                <span>Other nearby activities</span>
+                <span>{{ selectionPopupTracksWithoutMedia.length }}</span>
+              </h3>
+              <NearbyTrackList
+                :tracks="selectionPopupTracksWithoutMedia"
+                show-media-status
+                @select="onPopupTrackSelect"
               />
-              <div class="mtl-track-pick__content">
-                <div class="mtl-track-pick__primary">{{ track.displayName }}</div>
-                <div class="mtl-track-pick__secondary">
-                  <ActivityTypeBadge v-if="track.activityType" :type="track.activityType" size="xs" />
-                  <span class="mtl-track-pick__date">{{ track.date }}</span>
-                  <span v-if="track.description" class="mtl-track-pick__description">{{ track.description }}</span>
-                </div>
-              </div>
-              <i class="bi bi-chevron-right mtl-track-pick__chevron"></i>
-            </li>
-          </ul>
+            </section>
+          </template>
+          <NearbyTrackList v-else :tracks="selectionPopupTracks" @select="onPopupTrackSelect" />
         </div>
       </div>
     </BottomSheet>
@@ -357,8 +430,17 @@
       v-if="swissMobilityPopup.visible"
       class="swiss-mobility-popup"
       :style="{ left: swissMobilityPopup.pos.x + 'px', top: swissMobilityPopup.pos.y + 'px' }"
+      @click.stop
     >
-      <div class="swiss-mobility-popup-close" @click="closeSwissMobilityPopup">&times;</div>
+      <button
+        class="swiss-mobility-popup-close"
+        type="button"
+        aria-label="Close nearby routes popup"
+        title="Close"
+        @click.stop="closeSwissMobilityPopup"
+      >
+        <i class="bi bi-x-lg" aria-hidden="true"></i>
+      </button>
       <div class="swiss-mobility-popup-header"><i class="bi bi-signpost-split"></i> Nearby Routes</div>
       <ul class="swiss-mobility-route-list">
         <li v-for="(mobilityRoute, i) in swissMobilityPopup.routes" :key="i" class="swiss-mobility-route-item">
@@ -406,7 +488,7 @@
 </template>
 
 <script setup lang="ts">
-import { inject, nextTick, ref, watch } from 'vue';
+import { computed, inject, nextTick, ref, watch } from 'vue';
 import { useRoute, useRouter, type RouteRecordNameGeneric } from 'vue-router';
 import AdminDialog from '@/components/admin/AdminDialog.vue';
 import GpsLocate from '@/components/gps/GpsLocate.vue';
@@ -420,48 +502,56 @@ import TrackReplayControls from '@/components/replay/TrackReplayControls.vue';
 import NavigationSheet from '@/components/ui/NavigationSheet.vue';
 import MapSettingsPanel from '@/components/map/MapSettingsPanel.vue';
 import MapLegend from '@/components/map/MapLegend.vue';
+import MapConfigFallbackNotice from '@/components/map/MapConfigFallbackNotice.vue';
 import LocationSearchSheet from '@/components/map/LocationSearchSheet.vue';
 import BottomSheet from '@/components/ui/BottomSheet.vue';
-import TrackShapePreview from '@/components/ui/TrackShapePreview.vue';
 import ActivityTypeBadge from '@/components/ui/ActivityTypeBadge.vue';
+import NearbyTrackList from '@/components/map/NearbyTrackList.vue';
+import MediaCollectionChooser from '@/components/map/MediaCollectionChooser.vue';
 import MediaPreview from '@/components/map/MediaPreview.vue';
+import MediaViewerThemeToggle from '@/components/map/MediaViewerThemeToggle.vue';
+import { useMediaViewerTheme } from '@/composables/useMediaViewerTheme';
 import { useMainMapController } from '@/components/map/useMainMapController';
+import { findMediaPointById } from '@/components/map/composables/useMediaAndHeatmap';
+import type { MapControllerEmit, MapControllerProps } from '@/components/map/composables/mapControllerRuntime';
+import type { ToastService } from '@/types/ui';
+import { clearMapConfigCache, type MapConfig } from '@/utils/mapConfigService';
 
 defineOptions({
   name: 'Map2DRenderer',
 });
 
-const props = withDefaults(defineProps<{ fromLogin?: boolean }>(), { fromLogin: false });
-const emit = defineEmits<{
-  'tracks-loaded': [];
-  'load-failed': [];
-  syncing: [value: boolean];
-}>();
+const props = withDefaults(defineProps<MapControllerProps>(), { fromLogin: false });
+const emit = defineEmits<MapControllerEmit>();
 
-type ToastLike = { add: (options: { severity: string; summary: string; detail?: string; life?: number }) => void };
-const toast = inject<ToastLike>('toast', { add: () => undefined });
+const toast = inject<ToastService>('toast', { add: () => undefined });
 const route = useRoute();
 const router = useRouter();
+const { mediaViewerThemeClass } = useMediaViewerTheme();
 
-const mapBaseContainer = ref(null);
-const mapOverlayContainer = ref(null);
+const mapContainer = ref(null);
 const navSheet = ref(null);
 const mapSettingsTool = ref(null);
 const animateTool = ref(null);
 const measureTool = ref(null);
 const plannerTool = ref(null);
-const statistics = ref(null);
+const statistics = ref<{ close?: () => void } | null>(null);
 const gpsLocate = ref(null);
 const filterTool = ref(null);
 const adminTool = ref(null);
+const mapConfigFallbackDismissed = ref(false);
+const mapConfigRetrying = ref(false);
+const MEDIA_PREVIEW_DESKTOP_MIN_WIDTH = 769;
 
 const {
   overlayMap,
   geojson,
+  mapConfig,
   mapServerStatus,
   showLoader,
   loadingTrackBatches,
   loadingTracks10m,
+  initialLoadDone,
   mapThemesForPanel,
   mapThemeSelected,
   mapSourceMode,
@@ -469,6 +559,7 @@ const {
   visibleTrackCount,
   totalTrackCount,
   filterActive,
+  activeFilterIdentity,
   colorPalette,
   legendEntries,
   legendMode,
@@ -478,11 +569,13 @@ const {
   hiddenGroups,
   selectedFeature,
   trackSelectionSheetVisible,
+  trackSelectionPurpose,
   swissMobilityPopup,
   trackDetailsVisible,
   trackDetailsBackgroundDetent,
   trackDetailsDetents,
   trackDetailsInitialDetent,
+  trackDetailsInitialTab,
   trackDetailsSelectedDetent,
   trackDetailsId,
   trackDetailsInfo,
@@ -503,19 +596,28 @@ const {
   locationSearchVisible,
   activeToolId,
   toolDefs,
+  mediaSelectionSheetVisible,
+  mediaPendingSelection,
+  mediaSelectionTrackOptions,
+  mediaSelectionTracksLoading,
   mediaSheetVisible,
   mediaSheetMediaId,
   mediaNavList,
+  mediaNavTotal,
+  mediaNavOffset,
+  mediaNavLoading,
+  mediaNavScope,
   isOffline,
-  serverFreshnessToken,
   freshnessReloading,
   geoDrawingParamDef,
   selectionPopupTracks,
-  baseMapStyle,
   layerStatesForPanel,
   mediaCurrentIndex,
+  mediaCanGoPrev,
+  mediaCanGoNext,
   mediaPrevId,
   mediaNextId,
+  mediaNavigationIds,
   showLocationSearchFab,
   locationSearchMapCenter,
   trackBrowserTracks,
@@ -557,10 +659,16 @@ const {
   onToolClosed,
   closeSwissMobilityPopup,
   closeSelectionPopup,
+  chooseMediaCollection,
+  openMediaSelectionActivities,
+  closeMediaSelection,
   navigateMediaTo,
-  closeMediaSheet,
+  navigateMediaRelative,
+  navigateMediaPage,
+  closeMediaSheet: closeControllerMediaSheet,
+  focusMediaOnMainMap,
   onPopupTrackSelect,
-  onTrackDetailsSheetClosed,
+  onTrackDetailsSheetClosed: closeControllerTrackDetailsSheet,
   onTrackDetailsLoaded,
   start3dTrackReplay,
   toggle3dTrackReplayPlayback,
@@ -576,6 +684,7 @@ const {
   recenter3dTrackReplayCamera,
   onTrackBrowserSelect,
   onTrackBrowserOpenDetails,
+  onTrackBrowserOpenPhotos,
   onLegendCollapsed,
   onHiddenGroupsChanged,
   onStartGeoDrawing,
@@ -585,9 +694,9 @@ const {
   onClearGeoShape,
   onFilterApplied,
   onFilterStyleChanged,
+  reloadMap,
 } = useMainMapController(props, emit, toast, {
-  mapBaseContainer,
-  mapOverlayContainer,
+  mapContainer,
   navSheet,
   mapSettingsTool,
   animateTool,
@@ -598,6 +707,135 @@ const {
   filterTool,
   adminTool,
 });
+
+const mediaPreviewDetailsVisible = ref(window.innerWidth >= MEDIA_PREVIEW_DESKTOP_MIN_WIDTH);
+const mediaViewerOverviewBounds = ref<[[number, number], [number, number]] | null>(null);
+const selectedMapMediaPoint = computed(() => findMediaPointById(mediaNavList.value, mediaSheetMediaId.value));
+const trackSelectionSheetTitle = computed(() =>
+  trackSelectionPurpose.value === 'photos'
+    ? `${selectionPopupTracks.value.length} nearby activities`
+    : `${selectionPopupTracks.value.length} tracks — select for details`
+);
+const selectionPopupTracksWithMedia = computed(() =>
+  selectionPopupTracks.value.filter((track) => (track.matchedMediaCount ?? 0) > 0)
+);
+const selectionPopupTracksWithoutMedia = computed(() =>
+  selectionPopupTracks.value.filter((track) => (track.matchedMediaCount ?? 0) === 0)
+);
+const mediaViewerScopeLabel = computed(() => {
+  if (mediaNavScope.value === 'cluster') return 'This cluster';
+  if (mediaNavScope.value === 'location') return 'This location';
+  if (mediaNavScope.value === 'viewport') return 'Current map view';
+  return 'This photo';
+});
+const mediaViewerFilmstripLabel = computed(() => {
+  if (mediaNavScope.value === 'cluster') return 'In this cluster';
+  if (mediaNavScope.value === 'location') return 'At this location';
+  if (mediaNavScope.value === 'viewport') return 'On this map';
+  return 'This photo';
+});
+type MainMapMediaTarget = { id?: number | null; lat: number; lng: number };
+const pendingMainMapMediaTarget = ref<MainMapMediaTarget | null>(null);
+
+function validMainMapMediaTarget(target: MainMapMediaTarget | null | undefined): target is MainMapMediaTarget {
+  return Boolean(
+    target &&
+    Number.isFinite(target.lat) &&
+    Number.isFinite(target.lng) &&
+    Math.abs(target.lat) <= 90 &&
+    Math.abs(target.lng) <= 180
+  );
+}
+
+function setPendingMainMapMediaTarget(target: MainMapMediaTarget | null | undefined): boolean {
+  if (!validMainMapMediaTarget(target)) return false;
+  pendingMainMapMediaTarget.value = { id: target.id, lat: target.lat, lng: target.lng };
+  return true;
+}
+
+function focusPendingMainMapMediaTarget(): void {
+  const target = pendingMainMapMediaTarget.value;
+  pendingMainMapMediaTarget.value = null;
+  if (target) focusMediaOnMainMap(target);
+}
+
+function openSelectedMapMediaOnMainMap(): void {
+  if (!setPendingMainMapMediaTarget(selectedMapMediaPoint.value)) return;
+  mediaSheetVisible.value = false;
+}
+
+function onMediaSheetClosed(): void {
+  closeControllerMediaSheet();
+  mediaViewerOverviewBounds.value = null;
+  focusPendingMainMapMediaTarget();
+}
+
+function openTrackMediaOnMainMap(target: MainMapMediaTarget): void {
+  if (!setPendingMainMapMediaTarget(target)) return;
+  trackDetailsMainMapExitPending = true;
+  trackDetailsVisible.value = false;
+  closeControllerTrackDetailsSheet();
+  focusPendingMainMapMediaTarget();
+}
+
+function onTrackDetailsSheetClosedAfterTransition(): void {
+  closeControllerTrackDetailsSheet();
+  focusPendingMainMapMediaTarget();
+}
+
+async function openMediaFromStatisticsOnMainMap(target: MainMapMediaTarget): Promise<void> {
+  if (!setPendingMainMapMediaTarget(target)) return;
+  statistics.value?.close?.();
+  await nextTick();
+  window.requestAnimationFrame(focusPendingMainMapMediaTarget);
+}
+
+watch(mediaSheetVisible, (visible) => {
+  if (!visible) return;
+  mediaPreviewDetailsVisible.value = window.innerWidth >= MEDIA_PREVIEW_DESKTOP_MIN_WIDTH;
+  const bounds = overlayMap.value?.getBounds?.();
+  if (!bounds) return;
+  const southWest = bounds.getSouthWest();
+  const northEast = bounds.getNorthEast();
+  mediaViewerOverviewBounds.value = [
+    [southWest.lng, southWest.lat],
+    [northEast.lng, northEast.lat],
+  ];
+});
+
+const showMapConfigFallbackNotice = computed(
+  () => Boolean((mapConfig.value as MapConfig | null)?.configLoadFailed) && !mapConfigFallbackDismissed.value
+);
+
+async function retryMapConfig() {
+  if (mapConfigRetrying.value) return;
+  mapConfigRetrying.value = true;
+  mapConfigFallbackDismissed.value = false;
+  clearMapConfigCache();
+  try {
+    await reloadMap();
+  } finally {
+    mapConfigRetrying.value = false;
+  }
+}
+
+let tracksReadyEmitted = false;
+
+function emitTracksReadyOnce() {
+  if (tracksReadyEmitted) return;
+  tracksReadyEmitted = true;
+  emit('tracks-loaded');
+}
+
+watch(
+  [initialLoadDone, visibleTrackCount, totalTrackCount],
+  ([_isInitialLoadDone, visibleCount, totalCount]) => {
+    if (visibleCount > 0 || totalCount > 0) {
+      emitTracksReadyOnce();
+    }
+  },
+  { immediate: true }
+);
 
 const TOOL_ROUTE_NAMES: Record<string, string> = {
   stats: 'stats',
@@ -616,12 +854,19 @@ const ROUTE_TOOL_IDS: Record<string, string> = Object.entries(TOOL_ROUTE_NAMES).
   },
   {} as Record<string, string>
 );
+const TRACK_DETAILS_ROUTE_NAME = 'track-detail';
+const TRACK_DETAILS_RETURN_ROUTE_NAMES = new Set([
+  'home',
+  TRACK_DETAILS_ROUTE_NAME,
+  ...Object.values(TOOL_ROUTE_NAMES),
+]);
 
 let syncingFromRoute = false;
+let trackDetailsRouteExitPending = false;
+let trackDetailsMainMapExitPending = false;
 
 function closeTrackDetailsFromPanel() {
   trackDetailsVisible.value = false;
-  onTrackDetailsSheetClosed();
 }
 
 function toolIdForRoute(name: RouteRecordNameGeneric | null | undefined): string | null {
@@ -648,12 +893,39 @@ function onNavigationToolSelect(toolId: string) {
   updateRouteForTool(activeToolId.value);
 }
 
+function canReturnFromTrackDetails(previousRoute: unknown): previousRoute is string {
+  if (typeof previousRoute !== 'string' || previousRoute.length === 0) return false;
+  const resolvedRouteName = router.resolve(previousRoute).name;
+  return typeof resolvedRouteName === 'string' && TRACK_DETAILS_RETURN_ROUTE_NAMES.has(resolvedRouteName);
+}
+
+function leaveTrackDetailsRoute() {
+  if (trackDetailsRouteExitPending || route.name !== TRACK_DETAILS_ROUTE_NAME) return;
+  trackDetailsRouteExitPending = true;
+  if (trackDetailsMainMapExitPending) {
+    trackDetailsMainMapExitPending = false;
+    router.replace({ name: 'home' }).catch(() => {
+      trackDetailsRouteExitPending = false;
+    });
+    return;
+  }
+  const previousRoute = (window.history.state as { back?: unknown } | null)?.back;
+  if (canReturnFromTrackDetails(previousRoute)) {
+    router.back();
+    return;
+  }
+  router.replace({ name: 'home' }).catch(() => {
+    trackDetailsRouteExitPending = false;
+  });
+}
+
 watch(
   () => [route.name, route.params.id],
   async () => {
+    trackDetailsRouteExitPending = false;
     syncingFromRoute = true;
     await nextTick();
-    if (route.name === 'track-detail') {
+    if (route.name === TRACK_DETAILS_ROUTE_NAME) {
       const trackId = Number(route.params.id);
       if (Number.isFinite(trackId)) {
         syncTrackDetailRoute(trackId);
@@ -674,11 +946,11 @@ watch(activeToolId, (toolId) => {
 watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   if (syncingFromRoute) return;
   if (visible && id != null) {
-    if (route.name !== 'track-detail' || Number(route.params.id) !== Number(id)) {
-      router.push({ name: 'track-detail', params: { id } }).catch(() => undefined);
+    if (route.name !== TRACK_DETAILS_ROUTE_NAME || Number(route.params.id) !== Number(id)) {
+      router.push({ name: TRACK_DETAILS_ROUTE_NAME, params: { id } }).catch(() => undefined);
     }
-  } else if (route.name === 'track-detail') {
-    router.push({ name: 'home' }).catch(() => undefined);
+  } else if (route.name === TRACK_DETAILS_ROUTE_NAME) {
+    leaveTrackDetailsRoute();
   }
 });
 </script>
@@ -690,6 +962,11 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
 }
 
 .container {
+  --mtl-location-search-fab-size: 3rem;
+  --mtl-map-attribution-strip-h: 0.85rem;
+  --mtl-map-attribution-bottom-gap: 0px;
+  --mtl-location-search-bottom-gap: 0.4rem;
+
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
@@ -711,8 +988,7 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   }
 }
 
-.map-base,
-.map-overlay {
+.map {
   position: absolute;
   top: 0;
   left: 0;
@@ -720,23 +996,44 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   height: 100%;
 }
 
-/* Desktop: position overlays relative to map area */
-
-.map-base {
-  pointer-events: none;
+.map :deep(.maplibregl-ctrl-bottom-right) {
+  right: 0;
+  bottom: calc(var(--nav-sheet-h, 0px) + var(--safe-bottom, 0px));
 }
 
-.map-overlay :deep(.maplibregl-canvas) {
-  background: transparent !important;
+.map :deep(.maplibregl-ctrl-bottom-right .maplibregl-ctrl) {
+  margin: 0 var(--mtl-map-attribution-bottom-gap) var(--mtl-map-attribution-bottom-gap) 0;
 }
 
-.map-base :deep(.maplibregl-control-container) {
-  display: none;
+.map :deep(.maplibregl-ctrl-attrib) {
+  max-width: min(80vw, 34rem);
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 0.32rem;
+  border-radius: 2px;
+  background: rgba(15, 23, 42, 0.48);
+  box-shadow: none;
+  color: rgba(248, 250, 252, 0.68);
+  font-size: 0.58rem;
+  font-weight: 400;
+  line-height: var(--mtl-map-attribution-strip-h);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map :deep(.maplibregl-ctrl-attrib a) {
+  color: inherit;
+  text-decoration: none;
+}
+
+.map :deep(.maplibregl-ctrl-attrib a:hover) {
+  color: rgba(248, 250, 252, 0.88);
+  text-decoration: underline;
 }
 
 /* ─── Custom map control buttons ─── */
-.map-overlay :deep(.mtl-globe-btn),
-.map-overlay :deep(.mtl-terrain-btn) {
+.map :deep(.mtl-globe-btn),
+.map :deep(.mtl-terrain-btn) {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -752,29 +1049,29 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
     color 0.15s,
     background 0.15s;
 }
-.map-overlay :deep(.mtl-globe-btn:hover),
-.map-overlay :deep(.mtl-terrain-btn:hover) {
+.map :deep(.mtl-globe-btn:hover),
+.map :deep(.mtl-terrain-btn:hover) {
   background: var(--surface-hover);
   color: var(--text-primary);
 }
-.map-overlay :deep(.mtl-globe-btn.mtl-globe-active),
-.map-overlay :deep(.mtl-terrain-btn.mtl-terrain-active) {
-  color: #3b82f6;
+.map :deep(.mtl-globe-btn.mtl-globe-active),
+.map :deep(.mtl-terrain-btn.mtl-terrain-active) {
+  color: var(--info);
 }
-.map-overlay :deep(.mtl-terrain-btn.mtl-terrain-active) {
+.map :deep(.mtl-terrain-btn.mtl-terrain-active) {
   background: var(--accent) !important;
-  color: #fff !important;
+  color: var(--accent-contrast) !important;
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, #fff 18%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent-contrast) 18%, transparent),
     0 0 0 2px var(--accent-subtle);
 }
-.map-overlay :deep(.mtl-globe-btn.mtl-globe-active:hover),
-.map-overlay :deep(.mtl-terrain-btn.mtl-terrain-active:hover) {
-  color: #2563eb;
+.map :deep(.mtl-globe-btn.mtl-globe-active:hover),
+.map :deep(.mtl-terrain-btn.mtl-terrain-active:hover) {
+  color: var(--viz-blue);
 }
-.map-overlay :deep(.mtl-terrain-btn.mtl-terrain-active:hover) {
+.map :deep(.mtl-terrain-btn.mtl-terrain-active:hover) {
   background: var(--accent-hover) !important;
-  color: #fff !important;
+  color: var(--accent-contrast) !important;
 }
 
 /* ─── Top progress bar ─── */
@@ -814,15 +1111,6 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
     left: 120%;
   }
 }
-.bar-fade-enter-active,
-.bar-fade-leave-active {
-  transition: opacity 0.3s ease;
-}
-.bar-fade-enter-from,
-.bar-fade-leave-to {
-  opacity: 0;
-}
-
 /* ─── Transitions ─── */
 .fade-enter-active,
 .fade-leave-active {
@@ -869,12 +1157,15 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   position: fixed;
   z-index: var(--z-map-overlay-raised);
   right: calc(0.85rem + var(--safe-right, 0px));
-  bottom: calc(var(--nav-sheet-h, 92px) + 0.95rem + var(--safe-bottom, 0px));
+  bottom: calc(
+    var(--nav-sheet-h, 92px) + var(--safe-bottom, 0px) + var(--mtl-map-attribution-strip-h) +
+      var(--mtl-map-attribution-bottom-gap) + var(--mtl-location-search-bottom-gap)
+  );
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 3rem;
-  height: 3rem;
+  width: var(--mtl-location-search-fab-size);
+  height: var(--mtl-location-search-fab-size);
   border: 1px solid var(--border-medium);
   border-radius: 50%;
   background: var(--surface-glass-light);
@@ -901,8 +1192,8 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
 }
 
 @media (min-width: 1024px) {
-  .mtl-location-search-fab {
-    bottom: calc(1.2rem + var(--safe-bottom, 0px));
+  .container {
+    --mtl-location-search-bottom-gap: 0.55rem;
   }
 }
 
@@ -1020,7 +1311,7 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
 /* ─── Data freshness banner ─── */
 .mtl-data-freshness {
   position: fixed;
-  z-index: var(--z-map-overlay);
+  z-index: var(--z-freshness-banner);
   left: 50%;
   bottom: calc(var(--nav-sheet-h, 92px) + 0.8rem + var(--safe-bottom, 0px));
   transform: translateX(-50%);
@@ -1097,7 +1388,7 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
 .mtl-data-freshness__btn--primary {
   background: #0f766e;
   border-color: #0f766e;
-  color: #ffffff;
+  color: var(--accent-contrast);
 }
 .mtl-data-freshness__btn--primary:hover:not(:disabled) {
   background: #115e59;
@@ -1201,91 +1492,33 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   padding: 0 0.9rem 0.85rem;
 }
 
-.track-selection-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.track-selection-group {
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
+  gap: 0.65rem;
 }
 
-.mtl-track-pick {
+.track-selection-group + .track-selection-group {
+  margin-top: 1.1rem;
+}
+
+.track-selection-group__title {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.55rem 0.75rem;
-  cursor: pointer;
-  border: 1px solid var(--border-subtle);
-  border-radius: 0.95rem;
-  background: linear-gradient(135deg, var(--surface-glass-heavy), var(--surface-glass-subtle));
+  padding: 0 0.2rem;
+  margin: 0;
   color: var(--text-secondary);
-  transition:
-    transform 0.15s,
-    background 0.12s,
-    border-color 0.12s,
-    color 0.12s;
-}
-.mtl-track-pick:hover {
-  transform: translateY(-1px);
-  background: color-mix(in srgb, var(--accent-bg) 65%, var(--surface-glass-heavy));
-  border-color: color-mix(in srgb, var(--accent-muted) 55%, var(--border-default));
-  color: var(--text-primary);
-}
-
-.mtl-track-pick__content {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 0.18rem;
-  min-width: 0;
-}
-.mtl-track-pick__shape {
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-.mtl-track-pick:hover .mtl-track-pick__shape {
-  opacity: 1;
-}
-.mtl-track-pick__primary {
-  min-width: 0;
-  font-size: var(--text-sm-size);
-  font-weight: 600;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.mtl-track-pick__secondary {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
   font-size: var(--text-xs-size);
-  color: var(--text-muted);
-}
-.mtl-track-pick__date {
-  flex: 0 0 auto;
-  font-weight: 600;
-  white-space: nowrap;
-  color: inherit;
-}
-.mtl-track-pick__description {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mtl-track-pick__description::before {
-  content: '•';
-  margin-right: 0.35rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
 
-.mtl-track-pick__chevron {
-  flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: var(--text-base-size);
+.track-selection-group__title > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 /* ─── Swiss Mobility route info popup ─── */
@@ -1298,20 +1531,37 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   border: 1px solid var(--border-medium);
   border-radius: 0.75rem;
   box-shadow: var(--shadow-lg);
-  max-width: 300px;
-  min-width: 180px;
+  width: min(300px, calc(100% - 24px));
+  min-width: min(180px, calc(100% - 24px));
+  max-height: min(28rem, calc(100% - 24px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .swiss-mobility-popup-close {
   position: absolute;
-  top: 4px;
-  right: 8px;
+  top: 0.25rem;
+  right: 0.35rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
   cursor: pointer;
-  font-size: var(--text-lg-size);
+  font-size: var(--text-xs-size);
   color: var(--text-muted);
   z-index: 1;
-  transition: color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
-.swiss-mobility-popup-close:hover {
+.swiss-mobility-popup-close:hover,
+.swiss-mobility-popup-close:focus-visible {
+  background: var(--surface-hover);
   color: var(--text-primary);
 }
 .swiss-mobility-popup-header {
@@ -1320,13 +1570,15 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-faint);
-  padding: 0.4rem 0.85rem 0.3rem;
+  padding: 0.4rem 2.6rem 0.3rem 0.85rem;
   border-bottom: 1px solid var(--border-subtle);
 }
 .swiss-mobility-route-list {
   list-style: none;
   margin: 0;
   padding: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 .swiss-mobility-route-item {
   display: flex;
@@ -1374,8 +1626,53 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
 }
 </style>
 
-<!-- Track point popup styles (unscoped — MapLibre popups live outside component root) -->
+<!-- Unscoped map overlay styles -->
 <style>
+.mtl-focused-media-marker {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 2.125rem;
+  height: 2.125rem;
+  border: 3px solid #ffffff;
+  border-radius: 50%;
+  outline: 4px solid color-mix(in srgb, var(--accent) 62%, transparent);
+  outline-offset: 3px;
+  background: #ff0033;
+  color: #ffffff;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45);
+  font-size: 0.9rem;
+  pointer-events: none;
+}
+
+.mtl-focused-media-marker::after {
+  content: '';
+  position: absolute;
+  inset: -0.45rem;
+  border: 3px solid var(--accent);
+  border-radius: 50%;
+  animation: mtl-focused-media-marker-pulse 760ms ease-out 3;
+  pointer-events: none;
+}
+
+@keyframes mtl-focused-media-marker-pulse {
+  from {
+    opacity: 0.85;
+    transform: scale(0.72);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mtl-focused-media-marker::after {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 .mtl-location-search-marker {
   position: relative;
   display: inline-flex;
@@ -1383,10 +1680,10 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   justify-content: center;
   width: 2.1rem;
   height: 2.1rem;
-  border: 2px solid #ffffff;
+  border: 2px solid var(--accent-contrast);
   border-radius: 50%;
   background: var(--accent);
-  color: #ffffff;
+  color: var(--accent-contrast);
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.35);
   font-size: 1.1rem;
 }
@@ -1402,8 +1699,8 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   height: 1.1rem;
   border: 1px solid rgba(15, 23, 42, 0.18);
   border-radius: 50%;
-  background: #ffffff;
-  color: #334155;
+  background: var(--accent-contrast);
+  color: var(--text-secondary);
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.2);
   cursor: pointer;
   font-size: 0.85rem;
@@ -1424,77 +1721,9 @@ watch([trackDetailsVisible, trackDetailsId], ([visible, id]) => {
   width: 0.65rem;
   height: 0.65rem;
   background: var(--accent);
-  border-right: 2px solid #ffffff;
-  border-bottom: 2px solid #ffffff;
+  border-right: 2px solid var(--accent-contrast);
+  border-bottom: 2px solid var(--accent-contrast);
   transform: translateX(-50%) rotate(45deg);
-}
-
-.mtl-point-popup-container .maplibregl-popup-content {
-  padding: 0;
-  border-radius: 0.6rem;
-  background: var(--surface-glass-heavy);
-  backdrop-filter: var(--blur-standard);
-  -webkit-backdrop-filter: var(--blur-standard);
-  border: 1px solid var(--border-medium);
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  overflow: hidden;
-}
-.mtl-point-popup-container .maplibregl-popup-close-button {
-  font-size: var(--text-base-size);
-  color: var(--text-muted);
-  padding: 4px 8px;
-  line-height: var(--text-base-lh);
-}
-.mtl-point-popup-container .maplibregl-popup-close-button:hover {
-  color: var(--text-primary);
-  background: transparent;
-}
-.mtl-point-popup-container .maplibregl-popup-tip {
-  border-top-color: var(--surface-glass-heavy);
-}
-.mtl-point-popup {
-  padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  font-size: var(--text-xs-size);
-  line-height: var(--text-xs-lh);
-  color: var(--text-secondary);
-  -webkit-user-select: text;
-  user-select: text;
-}
-.mtl-point-popup-header {
-  padding: 0.35rem 0.6rem;
-  font-weight: 700;
-  font-size: var(--text-xs-size);
-  color: var(--text-primary);
-  background: var(--surface-elevated);
-  border-bottom: 1px solid var(--border-subtle);
-  cursor: text;
-  -webkit-user-select: text;
-  user-select: text;
-}
-.mtl-point-popup-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-.mtl-point-popup-table tr:not(:last-child) {
-  border-bottom: 1px solid var(--border-subtle);
-}
-.mtl-point-popup-table td {
-  padding: 0.2rem 0.6rem;
-  vertical-align: top;
-}
-.mtl-pp-label {
-  color: var(--text-muted);
-  white-space: nowrap;
-  padding-right: 0.8rem;
-  font-size: var(--text-2xs-size);
-}
-.mtl-pp-value {
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  white-space: nowrap;
-  font-weight: 500;
 }
 
 /* ── Geo drawing toolbar ── */

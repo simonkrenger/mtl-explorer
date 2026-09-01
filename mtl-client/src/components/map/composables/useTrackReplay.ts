@@ -11,6 +11,9 @@ import { ReplayCameraRailPlanner } from '@/components/replay/replayCameraRailPla
 import {
   computeReplayViewportPadding,
   observeReplayViewportOcclusion,
+  replayCameraViewportKey,
+  replayMapPadding,
+  resolveReplayCameraViewport,
 } from '@/components/replay/replayViewportOcclusion';
 import { ReplayCameraScreenGuard } from '@/components/replay/replayCameraScreenGuard';
 import { useMapStateStore } from '@/stores/mapStateStore';
@@ -26,7 +29,13 @@ const TRACK_REPLAY_TRACK_OPACITY = 0.18;
 const REPLAY_CAMERA_MAP_MARGIN_PX = 32;
 const REPLAY_CAMERA_MIN_VISIBLE_WIDTH_PX = 180;
 const REPLAY_CAMERA_MIN_VISIBLE_HEIGHT_PX = 160;
-const REPLAY_CAMERA_VIEWPORT_KEY_STEP_PX = 8;
+const TRACK_REPLAY_OPACITY_PROPERTIES = [
+  ['tracks-layer', 'line-opacity'],
+  ['tracks-highlight-layer', 'line-opacity'],
+  ['tracks-highlight-dash-layer', 'line-opacity'],
+  ['tracks-dot-layer', 'circle-opacity'],
+  ['tracks-overview-dots', 'circle-opacity'],
+] as const;
 
 export function useTrackReplay(_deps: Record<string, never> = {}): MapControllerMethodDefinitions<TrackReplayMethods> {
   const methods: MapControllerMethodDefinitions<TrackReplayMethods> = {
@@ -125,13 +134,7 @@ export function useTrackReplay(_deps: Record<string, never> = {}): MapController
       const opacity = this.trackReplayShowContextTracks ? TRACK_REPLAY_TRACK_OPACITY : 0;
       this.applyTrackRenderFilters();
       if (!this.overlayMap) return;
-      for (const [layerId, property] of [
-        ['tracks-layer', 'line-opacity'],
-        ['tracks-highlight-layer', 'line-opacity'],
-        ['tracks-highlight-dash-layer', 'line-opacity'],
-        ['tracks-dot-layer', 'circle-opacity'],
-        ['tracks-overview-dots', 'circle-opacity'],
-      ]) {
+      for (const [layerId, property] of TRACK_REPLAY_OPACITY_PROPERTIES) {
         if (this.overlayMap.getLayer(layerId)) {
           this.overlayMap.setPaintProperty(layerId, property, opacity);
         }
@@ -181,10 +184,18 @@ export function useTrackReplay(_deps: Record<string, never> = {}): MapController
       );
       const sample = sampleReplayPath(path, frame.progress);
       if (sample) {
-        this.trackReplayDistanceLabel = `${formatDistanceSmart(sample.distanceMeters, path.totalDistanceMeters)} / ${formatDistanceSmart(path.totalDistanceMeters, path.totalDistanceMeters)}`;
+        this.refreshTrackReplayMeasurementLabels();
       }
       this._trackReplayLayer?.setProgress(frame.progress);
       this.applyTrackReplayCamera(frame.progress, false, frame.elapsedReplaySeconds);
+    },
+
+    refreshTrackReplayMeasurementLabels() {
+      const path = this._trackReplayPath;
+      if (!path) return;
+      const sample = sampleReplayPath(path, this.trackReplayProgress);
+      if (!sample) return;
+      this.trackReplayDistanceLabel = `${formatDistanceSmart(sample.distanceMeters, path.totalDistanceMeters)} / ${formatDistanceSmart(path.totalDistanceMeters, path.totalDistanceMeters)}`;
     },
 
     rebuildTrackReplayCameraRail() {
@@ -208,15 +219,7 @@ export function useTrackReplay(_deps: Record<string, never> = {}): MapController
 
     trackReplayCameraViewport() {
       const canvas = this.overlayMap?.getCanvas?.();
-      if (!canvas) return undefined;
-      const width = canvas.clientWidth || canvas.width;
-      const height = canvas.clientHeight || canvas.height;
-      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return undefined;
-      return {
-        width,
-        height,
-        ...this.trackReplayCameraViewportPadding(REPLAY_CAMERA_MAP_MARGIN_PX),
-      };
+      return resolveReplayCameraViewport(canvas, this.trackReplayCameraViewportPadding(REPLAY_CAMERA_MAP_MARGIN_PX));
     },
 
     trackReplayCameraViewportPadding(baseMarginPx = REPLAY_CAMERA_MAP_MARGIN_PX) {
@@ -231,27 +234,11 @@ export function useTrackReplay(_deps: Record<string, never> = {}): MapController
     },
 
     trackReplayMapPadding(baseMarginPx = REPLAY_CAMERA_MAP_MARGIN_PX) {
-      const padding = this.trackReplayCameraViewportPadding(baseMarginPx);
-      return {
-        top: padding.paddingTop,
-        right: padding.paddingRight,
-        bottom: padding.paddingBottom,
-        left: padding.paddingLeft,
-      };
+      return replayMapPadding(this.trackReplayCameraViewportPadding(baseMarginPx));
     },
 
     trackReplayCameraViewportKey(viewport) {
-      if (!viewport) return 'none';
-      return [
-        viewport.width,
-        viewport.height,
-        viewport.paddingTop ?? 0,
-        viewport.paddingRight ?? 0,
-        viewport.paddingBottom ?? 0,
-        viewport.paddingLeft ?? 0,
-      ]
-        .map((value) => Math.round(Number(value) / REPLAY_CAMERA_VIEWPORT_KEY_STEP_PX))
-        .join(':');
+      return replayCameraViewportKey(viewport);
     },
 
     onTrackReplayControlsLayoutChange(layout) {
@@ -301,7 +288,7 @@ export function useTrackReplay(_deps: Record<string, never> = {}): MapController
           frame,
           padding: this.trackReplayMapPadding(REPLAY_CAMERA_MAP_MARGIN_PX),
           applyFrame: (view) => {
-            this.jumpOverlayCameraAndSyncBase(view);
+            this.jumpMapCamera(view);
           },
         });
       } finally {
@@ -466,7 +453,7 @@ export function useTrackReplay(_deps: Record<string, never> = {}): MapController
           this.deselectTrack();
         }
         if (this.overlayMap && restoreState.camera) {
-          this.jumpOverlayCameraAndSyncBase({
+          this.jumpMapCamera({
             ...restoreState.camera,
             padding: { top: 0, right: 0, bottom: 0, left: 0 },
           });

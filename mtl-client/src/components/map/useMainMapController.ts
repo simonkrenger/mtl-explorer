@@ -10,11 +10,13 @@ import { ColorPalette } from '@/components/filter/ColorPalette';
 import { REPLAY_DEFAULT_TARGET_DURATION_SECONDS } from '@/components/replay/trackReplayPath';
 import { REPLAY_DEFAULT_CAMERA_PRESET, REPLAY_DEFAULT_CAMERA_SMOOTHNESS } from '@/components/replay/trackReplayCamera';
 import { describeError, startupError, startupLog } from '@/utils/startupDiagnostics';
-import thumbOsmTopo from '@/assets/map-layer/osm_topo.jpg';
-import thumbSwissColor from '@/assets/map-layer/swiss_color_contrast.jpg';
-import thumbSwissLight from '@/assets/map-layer/swiss_topo_light.jpg';
-import thumbOsmLight from '@/assets/map-layer/osm_light.jpg';
-import thumbOsmDark from '@/assets/map-layer/osm_dark.jpg';
+import thumbOsmTopoLight from '@/assets/map-layer/osm_topo_light.webp';
+import thumbOsmTopoContrast from '@/assets/map-layer/osm_topo_contrast.webp';
+import thumbSwissTopoColor from '@/assets/map-layer/swiss_topo_color.webp';
+import thumbSwissTopoLight from '@/assets/map-layer/swiss_topo_light.webp';
+import thumbOsmLight from '@/assets/map-layer/osm_light.webp';
+import thumbOsmGray from '@/assets/map-layer/osm_gray.webp';
+import thumbOsmDark from '@/assets/map-layer/osm_dark.webp';
 import { useMapTools } from '@/components/map/composables/useMapTools';
 import { useMapLayerSettings } from '@/components/map/composables/useMapLayerSettings';
 import { useTerrainMode } from '@/components/map/composables/useTerrainMode';
@@ -43,13 +45,17 @@ import type {
 import { useMapStateStore } from '@/stores/mapStateStore';
 import { storeToRefs } from 'pinia';
 import { isRemoteRasterMapTheme } from '@/components/map/mapStyleResolver';
+import { TOPO_CONTRAST_THEME } from '@/utils/mapStyle';
+import { readMapCameraState } from '@/components/map/mapRendererTypes';
+import { useMeasurementSystem } from '@/composables/useMeasurementSystem';
+import { syncMapScaleControlUnit } from '@/components/map/mapScaleControl';
 
 type ControllerMethod = (this: MapControllerRuntime, ...args: unknown[]) => unknown;
 type BoundControllerMethod = (...args: unknown[]) => unknown;
 
 /** Detent positions for the track details bottom sheet. */
 const TRACK_DETAILS_DETENTS: TrackDetailsDetent[] = [
-  { id: 'compact', height: '35vh' },
+  { id: 'compact', height: '66vh' },
   { id: 'default', height: '75vh' },
   { id: 'expanded', height: '92vh' },
 ];
@@ -77,13 +83,14 @@ export function useMainMapController(
   } = dataFreshness;
   const isAnyPending = computed(() => isIndexing.value || isJobPending.value);
   const filterStore = useFilterStore();
+  const filterStoreRefs = storeToRefs(filterStore);
   const mapSettingsStore = useMapSettingsStore();
   const mapStateStore = useMapStateStore();
   const mapStateRefs = storeToRefs(mapStateStore);
+  const { measurementSystem } = useMeasurementSystem();
 
   const state = reactive<MapControllerState>({
-    map: undefined, // base map (tiles + mobility overlays)
-    overlayMap: undefined, // overlay map (tracks, highlights, media)
+    overlayMap: undefined,
     mapConfig: null,
     mapServerStatus: null,
     mapStatusPollTimer: null,
@@ -104,11 +111,24 @@ export function useMainMapController(
     loadingTrackBatches: false,
     loadingTracks10m: false,
     mapThemes: [
-      { name: 'OSM Topo', code: 'light-topo', thumbnail: thumbOsmTopo, featured: true },
-      { name: 'Swiss Color', code: 'swisstopo-color', thumbnail: thumbSwissColor, featured: true },
-      { name: 'Swiss Light', code: 'swisstopo', thumbnail: thumbSwissLight },
+      {
+        name: 'OSM Topo Contrast',
+        code: TOPO_CONTRAST_THEME,
+        thumbnail: thumbOsmTopoContrast,
+        badgeLabel: 'Preferred',
+        badgeTone: 'preferred',
+      },
+      { name: 'OSM Topo Light', code: 'light-topo', thumbnail: thumbOsmTopoLight },
+      {
+        name: 'Swiss Topo Color',
+        code: 'swisstopo-color',
+        thumbnail: thumbSwissTopoColor,
+        badgeLabel: 'Swiss',
+        badgeTone: 'swiss',
+      },
+      { name: 'Swiss Topo Light', code: 'swisstopo', thumbnail: thumbSwissTopoLight },
       { name: 'OSM Light', code: 'light', thumbnail: thumbOsmLight },
-      { name: 'OSM Gray', code: 'grayscale', thumbnail: thumbOsmLight },
+      { name: 'OSM Gray', code: 'grayscale', thumbnail: thumbOsmGray },
       { name: 'OSM Dark', code: 'dark', thumbnail: thumbOsmDark },
     ],
 
@@ -133,21 +153,26 @@ export function useMainMapController(
     legendGradientBucketCount: 100,
     legendCollapsed: mapSettingsStore.legendCollapsed,
     hiddenGroups: new Set(),
+    renderedFilterConfigId: null,
     gpsTracksById: markRaw(new Map()),
     gpsTrackIdToFeature: markRaw(new Map()),
     selectedTrackId: mapStateStore.selectedTrackId,
     selectedFeature: null,
     trackSelectionSheetVisible: false,
     selectionPopupTrackIds: [],
+    selectionPopupMediaOptions: [],
+    trackSelectionPurpose: 'details',
     swissMobilityPopup: { visible: false, pos: { x: 0, y: 0 }, routes: [] },
     proximityAbortController: null,
     trackDetailsVisible: false,
     trackDetailsBackgroundDetent: TRACK_DETAILS_REPLAY_BACKGROUND_DETENT,
     trackDetailsDetents: TRACK_DETAILS_DETENTS,
     trackDetailsInitialDetent: TRACK_DETAILS_DEFAULT_DETENT,
+    trackDetailsInitialTab: 'overview',
     trackDetailsSelectedDetent: undefined,
     trackDetailsId: null,
     trackDetailsInfo: { id: null, name: '', description: '', activityType: '' },
+    trackDetailsReturnTarget: null,
     trackReplayActive: false,
     trackReplayLoading: false,
     trackReplayPlaying: false,
@@ -161,7 +186,7 @@ export function useMainMapController(
     trackReplaySpeedFactorLabel: '—',
     trackReplayCameraPreset: REPLAY_DEFAULT_CAMERA_PRESET,
     trackReplayCameraSmoothness: REPLAY_DEFAULT_CAMERA_SMOOTHNESS,
-    trackReplayDistanceLabel: '0 m',
+    trackReplayDistanceLabel: '—',
     trackReplayElapsedLabel: '0m 00s',
     trackReplayTotalLabel: '45s',
     _trackReplayPath: null,
@@ -202,10 +227,24 @@ export function useMainMapController(
     mediaOverlay: null,
     mediaVisible: mapSettingsStore.mediaVisible,
     mediaBusy: false,
+    focusedMediaMarker: null,
+    mediaSelectionSheetVisible: false,
+    mediaPendingSelection: null,
+    mediaSelectionTrackOptions: [],
+    mediaSelectionTracksLoading: false,
+    mediaSelectionAbortController: null,
+    mediaSelectionRequestToken: 0,
     mediaSheetVisible: false,
     mediaSheetMediaId: null,
     mediaLoadedPoints: [],
     mediaNavList: [],
+    mediaNavTotal: 0,
+    mediaNavOffset: 0,
+    mediaNavClusterId: null,
+    mediaNavPageSize: 0,
+    mediaNavLoading: false,
+    mediaNavRequestToken: 0,
+    mediaNavScope: 'photo',
     heatmapOverlay: null,
     heatmapVisible: mapSettingsStore.heatmapVisible,
     isOffline: false,
@@ -220,9 +259,11 @@ export function useMainMapController(
     detailAbortController: null,
     detailDebounceTimer: null,
     activeOverlays: [...mapSettingsStore.activeOverlays],
+    _scaleControl: null,
     _terrainControl: null,
+    _attributionLinkCleanup: null,
     _terrainTrackLayer: null,
-    _syncingView: false, // guard to prevent recursive view-sync loops
+    _syncingToolRoute: false,
     trackPointsVisible: mapSettingsStore.trackPointsVisible, // toggle for direction-arrow point markers
     // Key: `${trackId}|${precision}` — cache must invalidate when the
     // underlying SHAPE variant changes (precision upgrades from 10m → 1m),
@@ -233,6 +274,7 @@ export function useMainMapController(
     // given track, so no precision component is needed.
     trackPointsCanonicalCache: markRaw(new Map()), // trackId → GpsTrackDataPoint[]
     trackPointsPopup: null, // active MapLibre popup for a clicked point
+    trackPointsPopupContext: null,
     trackPointLayerHandlers: null,
     // Geo drawing
     geoDrawingOverlay: null,
@@ -246,6 +288,7 @@ export function useMainMapController(
 
   const setupBindings: MapControllerSetupBindings = {
     isIndexing: isAnyPending,
+    activeFilterIdentity: filterStoreRefs.activeIdentity,
     serverFreshnessToken,
     dataFreshnessLastChecked,
     refreshDataFreshness,
@@ -264,22 +307,11 @@ export function useMainMapController(
 
   const computedDefinitions: MapControllerComputedDefinitions = {
     selectionPopupTracks() {
-      return this.selectionPopupTrackIds.map((id) => this.getTrackPopupMeta(id));
-    },
-    baseMapStyle() {
-      // Basemap slider: combines desaturation, brightening, and opacity fade.
-      //   slider 100 → normal map
-      //   slider   0 → fully invisible
-      if (!this.basemapEnabled) return { opacity: 0.08 };
-      const pct = this.layerOpacities.basemap; // 0‒100
-      if (pct >= 100) return {};
-      const dim = (100 - pct) / 100; // 0‒1  (0 = normal, 1 = max dim)
-      const brightness = 1 + 0.4 * dim;
-      const opacity = pct / 100; // 1 at 100%, 0 at 0%
-      return {
-        filter: `grayscale(${dim}) brightness(${brightness})`,
-        opacity,
-      };
+      const mediaOptions = new Map(this.selectionPopupMediaOptions.map((option) => [option.trackId, option]));
+      return this.selectionPopupTrackIds.map((id) => ({
+        ...this.getTrackPopupMeta(id),
+        ...mediaOptions.get(id),
+      }));
     },
     layerStatesForPanel() {
       return {
@@ -318,6 +350,16 @@ export function useMainMapController(
       if (!this.mediaSheetMediaId || !this.mediaNavList.length) return -1;
       return this.mediaNavList.findIndex((p) => p.id === this.mediaSheetMediaId);
     },
+    mediaCanGoPrev() {
+      if (this.mediaNavLoading) return false;
+      const i = this.mediaCurrentIndex;
+      return i >= 0 && this.mediaNavOffset + i > 0;
+    },
+    mediaCanGoNext() {
+      if (this.mediaNavLoading) return false;
+      const i = this.mediaCurrentIndex;
+      return i >= 0 && this.mediaNavOffset + i + 1 < this.mediaNavTotal;
+    },
     mediaPrevId() {
       const i = this.mediaCurrentIndex;
       if (i <= 0) return null;
@@ -328,6 +370,11 @@ export function useMainMapController(
       if (i < 0 || i >= this.mediaNavList.length - 1) return null;
       return this.mediaNavList[i + 1].id ?? null;
     },
+    mediaNavigationIds() {
+      return this.mediaNavList
+        .map((point) => point.id)
+        .filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
+    },
     showLocationSearchFab() {
       return (
         !this.locationSearchVisible &&
@@ -337,6 +384,7 @@ export function useMainMapController(
         !this.geoDrawingParamDef &&
         !this.trackDetailsVisible &&
         !this.trackSelectionSheetVisible &&
+        !this.mediaSelectionSheetVisible &&
         !this.mediaSheetVisible
       );
     },
@@ -415,7 +463,7 @@ export function useMainMapController(
     ...useGeoDrawing(),
     ...useMediaAndHeatmap({ mapSettingsStore }),
     ...useMapDataLoading({ filterStore, freshnessStore }),
-    ...useMapRendererLifecycle(),
+    ...useMapRendererLifecycle({ mapSettingsStore }),
   };
 
   const computedRefs = {} as Partial<MapControllerComputedRefs>;
@@ -500,14 +548,15 @@ export function useMainMapController(
       state.locationSearchVisible,
       state.trackSelectionSheetVisible,
       state.trackDetailsVisible,
+      state.mediaSelectionSheetVisible,
       state.mediaSheetVisible,
     ],
-    ([locationSearchVisible, trackSelectionVisible, trackDetailsVisible, mediaVisible]) => {
+    ([locationSearchVisible, trackSelectionVisible, trackDetailsVisible, mediaSelectionVisible, mediaVisible]) => {
       mapStateStore.setSheetState({
         locationSearchVisible,
         trackSelectionVisible,
         trackDetailsVisible,
-        mediaVisible,
+        mediaVisible: mediaSelectionVisible || mediaVisible,
       });
     },
     { immediate: true }
@@ -579,7 +628,7 @@ export function useMainMapController(
     this.syncMapSettingsFromStore();
     window.addEventListener(MAP_ARCHIVE_STALE_EVENT, this.handleMapArchiveStale);
     try {
-      await this.reloadMap(true);
+      await this.reloadMap();
       const selectedTrackId = mapStateStore.selectedTrackId;
       if (selectedTrackId != null && this.gpsTrackIdToFeature?.has?.(selectedTrackId)) {
         this.selectedTrackId = null;
@@ -590,12 +639,17 @@ export function useMainMapController(
       startupError('map', 'Initial map reload failed', describeError(error));
       throw error;
     }
-    this._onOnline = markRaw(() => this.onBrowserOnline());
+    this._onOnline = markRaw(() => {
+      this.onBrowserOnline();
+      this.refreshMapStatusPolling(true);
+    });
     window.addEventListener('online', this._onOnline);
   }
 
   function beforeUnmount(this: MapControllerRuntime) {
-    if (mapStateStore.mapMode !== '3d') {
+    if (mapStateStore.mapMode === '3d' && this.overlayMap) {
+      mapStateStore.setReturnViewportCamera(readMapCameraState(this.overlayMap, true));
+    } else {
       this.stop3dTrackReplay({ restore: false });
     }
     this.stopMapStatusPolling();
@@ -605,10 +659,9 @@ export function useMainMapController(
     if (this.detailDebounceTimer) clearTimeout(this.detailDebounceTimer);
     if (this.detailAbortController) this.detailAbortController.abort();
     if (this.bulk10mController) this.bulk10mController.abort();
-    if (this.trackPointsPopup) {
-      this.trackPointsPopup.remove();
-      this.trackPointsPopup = null;
-    }
+    if (this.mediaSelectionAbortController) this.mediaSelectionAbortController.abort();
+    this.closeTrackPointPopup();
+    this.clearFocusedMediaMarker();
     this.clearLocationSearchMarker();
     if (this._resizeObserver) this._resizeObserver.disconnect();
     if (this.heatmapOverlay) {
@@ -619,23 +672,19 @@ export function useMainMapController(
       this.geoDrawingOverlay.destroy();
       this.geoDrawingOverlay = null;
     }
-    if (this.overlayMap) {
-      this.detachTrackPointLayerHandlers();
-      this.overlayMap.remove();
-      this.overlayMap = undefined;
-      this._terrainControl = null;
-      this._terrainTrackLayer = null;
-    }
-    if (this.map) {
-      this.map.remove();
-      this.map = undefined;
-    }
+    this.disposeRendererMaps();
   }
 
   onMounted(() => mounted.call(ctx));
   onBeforeUnmount(() => beforeUnmount.call(ctx));
 
   watch(serverFreshnessToken, () => ctx.maybeAutoFreshenAfterLogin());
+  watch(measurementSystem, () => {
+    syncMapScaleControlUnit(ctx._scaleControl, measurementSystem.value);
+    ctx.geoDrawingOverlay?.refreshMeasurementLabels();
+    ctx.refreshTrackPointPopupMeasurementLabels();
+    ctx.refreshTrackReplayMeasurementLabels();
+  });
   watch(
     () => state.initialLoadDone,
     () => ctx.maybeAutoFreshenAfterLogin()

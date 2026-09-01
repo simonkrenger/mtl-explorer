@@ -13,6 +13,9 @@ type MockFilterConfig = {
 // globals (highcharts/highlight.js Vue plugin), so we replace the whole
 // module with a self-contained fake.
 let __stored: ClientFilterConfig | null = null;
+const { fetchResolveFilterMock } = vi.hoisted(() => ({
+  fetchResolveFilterMock: vi.fn(),
+}));
 const __reset = () => {
   __stored = null;
 };
@@ -56,9 +59,15 @@ vi.mock('@/components/filter/FilterService', () => ({
   },
 }));
 
+vi.mock('@/utils/filterApi', () => ({
+  fetchResolveFilter: fetchResolveFilterMock,
+}));
+
 import { useFilterStore } from '@/stores/filterStore';
 import { FilterService } from '@/components/filter/FilterService';
 import type { FilterResult } from '@/types/filter';
+import { useLocale } from '@/composables/useLocale';
+import { useMeasurementSystem } from '@/composables/useMeasurementSystem';
 
 describe('useFilterStore', () => {
   beforeEach(async () => {
@@ -81,6 +90,78 @@ describe('useFilterStore', () => {
     const b = await store.ensureLoaded();
     expect(a).toBe(b);
     expect(FilterService.loadClientFilterConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('reacts to hydrated and updated active filter identities', async () => {
+    __stored = {
+      filterInfo: {
+        filterConfig: {
+          displayName: 'Tracks by year',
+          filterName: 'TracksByYear',
+          filterDomain: 'GPS_TRACK',
+        },
+      },
+      filterParams: {},
+      palette: {},
+    } as ClientFilterConfig;
+    const store = useFilterStore();
+
+    expect(store.activeIdentity).toBe('');
+    await store.ensureLoaded();
+    expect(store.activeIdentity).toBe('Tracks by year');
+
+    store.save({
+      filterInfo: {
+        filterConfig: {
+          displayName: 'Activities by keyword',
+          filterName: 'KeywordSearch',
+          filterDomain: 'GPS_TRACK',
+        },
+        paramDefinitions: [{ name: 'SEARCH_WORD' }],
+      },
+      filterParams: { stringParams: { SEARCH_WORD: 'Synthetic' } },
+      palette: {},
+    } as ClientFilterConfig);
+
+    expect(store.activeIdentity).toBe('Activities by keyword · Synthetic');
+  });
+
+  it('reacts to measurement changes in a numeric active filter identity', () => {
+    const measurementPreference = useMeasurementSystem();
+    const localePreference = useLocale();
+    const previousMeasurementSystem = measurementPreference.measurementSystem.value;
+    const previousLocale = localePreference.formatLocale.value;
+    const store = useFilterStore();
+
+    try {
+      localePreference.setLocale('de-DE');
+      measurementPreference.setMeasurementSystem('US_CUSTOMARY');
+      store.save({
+        filterInfo: {
+          filterConfig: {
+            displayName: 'Tracks by distance (gradient)',
+            filterName: 'TracksByDistanceGradient',
+            filterDomain: 'GPS_TRACK',
+          },
+          paramDefinitions: [{ name: 'DISTANCE_MAX_KM' }],
+          effectiveUiMetadata: {
+            params: {
+              DISTANCE_MAX_KM: { widget: 'number', unit: 'km' },
+            },
+          },
+        },
+        filterParams: { stringParams: { DISTANCE_MAX_KM: '16.09344' } },
+        palette: {},
+      } as ClientFilterConfig);
+
+      expect(store.activeIdentity).toBe('Tracks by distance (gradient) · 10 mi');
+
+      measurementPreference.setMeasurementSystem('METRIC');
+      expect(store.activeIdentity).toBe('Tracks by distance (gradient) · 16,09 km');
+    } finally {
+      measurementPreference.setMeasurementSystem(previousMeasurementSystem);
+      localePreference.setLocale(previousLocale);
+    }
   });
 
   it('ensureLoaded(true) forces a re-fetch', async () => {
@@ -126,13 +207,19 @@ describe('useFilterStore', () => {
     const store = useFilterStore();
     const cfg = {
       filterInfo: { filterConfig: { filterName: 'NonMotorized', filterDomain: 'GPS_TRACK' } },
-      filterParams: { stringParams: { ACTIVITY: 'human' } },
+      filterParams: {
+        stringParams: { ACTIVITY: 'human' },
+        resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
+      },
       palette: {},
     } as ClientFilterConfig;
     const result: FilterResult = {
       trackVersions: new Map([[1, 7]]),
       filterGroups: new Map([[1, 'WALKING']]),
       standardFilterCount: 10,
+      groupingAvailable: true,
+      availableGroups: [{ key: { value: 'WALKING' }, count: 1 }],
+      preGroupSelectionCount: 4,
     };
 
     expect(store.trackSetRevision).toBe(0);
@@ -144,12 +231,124 @@ describe('useFilterStore', () => {
     expect(store.trackSetRevision).toBe(1);
     expect(store.activeFilterRequest).toEqual({
       filterName: 'NonMotorized',
-      filterParams: { stringParams: { ACTIVITY: 'human' } },
+      filterParams: {
+        stringParams: { ACTIVITY: 'human' },
+        resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
+      },
+      resolvedTrackIds: [1],
     });
     await expect(store.getActiveFilterRequest()).resolves.toEqual({
       filterName: 'NonMotorized',
-      filterParams: { stringParams: { ACTIVITY: 'human' } },
+      filterParams: {
+        stringParams: { ACTIVITY: 'human' },
+        resultGroupSelection: { includedGroups: [{ value: 'WALKING' }] },
+      },
+      resolvedTrackIds: [1],
     });
+  });
+
+  it.each([
+    { transition: 'import', beforeIds: [], afterIds: [1, 2, 3, 4, 5] },
+    { transition: 'deletion', beforeIds: [1, 2, 3, 4, 5], afterIds: [1, 3, 5] },
+  ])('re-resolves cached filter IDs after a $transition freshness change', async ({ beforeIds, afterIds }) => {
+    const store = useFilterStore();
+    const cfg = {
+      filterInfo: { filterConfig: { id: 7, filterName: 'SmartBaseFilter', filterDomain: 'GPS_TRACK' } },
+      filterParams: {},
+      palette: {},
+    } as ClientFilterConfig;
+    store.applyResolvedFilter(cfg, {
+      trackVersions: new Map(beforeIds.map((id) => [id, 1])),
+      filterGroups: new Map(),
+      standardFilterCount: beforeIds.length,
+    });
+    const refreshedResult = {
+      queryResult: {
+        resultEntries: afterIds.map((id) => ({ id })),
+        standardFilterCount: afterIds.length,
+      },
+      filterConfigId: 7,
+      trackVersions: new Map(afterIds.map((id) => [id, 2])),
+      filterGroups: new Map(),
+      standardFilterCount: afterIds.length,
+    };
+    fetchResolveFilterMock.mockResolvedValueOnce(refreshedResult);
+    const revisionBeforeRefresh = store.trackSetRevision;
+
+    await expect(store.refreshResolvedFilter()).resolves.toBe(refreshedResult);
+
+    expect(fetchResolveFilterMock).toHaveBeenCalledWith(7, {}, false);
+    expect(store.activeResult).toBe(refreshedResult);
+    expect(store.activeFilterRequest?.resolvedTrackIds).toEqual(afterIds);
+    expect(store.trackSetRevision).toBe(revisionBeforeRefresh + 1);
+    expect(store.dataFreshnessRevision).toBe(1);
+  });
+
+  it('keeps the last good result visible while a freshness refresh is in flight', async () => {
+    const store = useFilterStore();
+    const cfg = {
+      filterInfo: { filterConfig: { id: 7, filterName: 'SmartBaseFilter', filterDomain: 'GPS_TRACK' } },
+      filterParams: {},
+      palette: {},
+    } as ClientFilterConfig;
+    const previousResult = {
+      trackVersions: new Map([[1, 1]]),
+      filterGroups: new Map(),
+      standardFilterCount: 1,
+    };
+    const refreshedResult = {
+      queryResult: { resultEntries: [{ id: 1 }, { id: 2 }], standardFilterCount: 2 },
+      filterConfigId: 7,
+      trackVersions: new Map([
+        [1, 2],
+        [2, 1],
+      ]),
+      filterGroups: new Map(),
+      standardFilterCount: 2,
+    };
+    let resolveRefresh!: (result: typeof refreshedResult) => void;
+    fetchResolveFilterMock.mockReturnValueOnce(
+      new Promise<typeof refreshedResult>((resolve) => {
+        resolveRefresh = resolve;
+      })
+    );
+    store.applyResolvedFilter(cfg, previousResult);
+
+    const refresh = store.refreshResolvedFilter();
+    await Promise.resolve();
+
+    expect(store.refreshingResolvedFilter).toBe(true);
+    expect(store.activeResult).toBe(previousResult);
+
+    resolveRefresh(refreshedResult);
+    await expect(refresh).resolves.toBe(refreshedResult);
+
+    expect(store.refreshingResolvedFilter).toBe(false);
+    expect(store.activeResult).toBe(refreshedResult);
+  });
+
+  it('retains the last good result when a freshness refresh fails', async () => {
+    const store = useFilterStore();
+    const cfg = {
+      filterInfo: { filterConfig: { id: 7, filterName: 'SmartBaseFilter', filterDomain: 'GPS_TRACK' } },
+      filterParams: {},
+      palette: {},
+    } as ClientFilterConfig;
+    const previousResult = {
+      trackVersions: new Map([[1, 1]]),
+      filterGroups: new Map(),
+      standardFilterCount: 1,
+    };
+    store.applyResolvedFilter(cfg, previousResult);
+    const revisionBeforeRefresh = store.trackSetRevision;
+    fetchResolveFilterMock.mockRejectedValueOnce(new Error('offline'));
+
+    await expect(store.refreshResolvedFilter()).rejects.toThrow('offline');
+
+    expect(store.refreshingResolvedFilter).toBe(false);
+    expect(store.activeResult).toBe(previousResult);
+    expect(store.trackSetRevision).toBe(revisionBeforeRefresh);
+    expect(store.dataFreshnessRevision).toBe(0);
   });
 
   it('treats a default filter with a palette as active', () => {

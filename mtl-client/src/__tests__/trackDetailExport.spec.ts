@@ -2,18 +2,13 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { defineComponent, nextTick } from 'vue';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TrackDetailOverview from '@/components/trackdetails/TrackDetailOverview.vue';
-import {
-  GpsTrackActivityTypeEnum,
-  GpsTrackStatisticsExclusionReasonEnum,
-} from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
+import { GpsTrackActivityTypeEnum } from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
 
 const mocks = vi.hoisted(() => ({
   calculateEnergyWhatIf: vi.fn(),
   downloadTrackGpx: vi.fn(),
   downloadTrackSourceFile: vi.fn(),
   saveTrackEnergyRiderWeight: vi.fn(),
-  updateTrackActivityType: vi.fn(),
-  updateTrackStatisticsExclusion: vi.fn(),
 }));
 
 vi.mock('@/utils/ServiceHelper', () => ({
@@ -21,8 +16,6 @@ vi.mock('@/utils/ServiceHelper', () => ({
   downloadTrackGpx: mocks.downloadTrackGpx,
   downloadTrackSourceFile: mocks.downloadTrackSourceFile,
   saveTrackEnergyRiderWeight: mocks.saveTrackEnergyRiderWeight,
-  updateTrackActivityType: mocks.updateTrackActivityType,
-  updateTrackStatisticsExclusion: mocks.updateTrackStatisticsExclusion,
 }));
 
 const ActivityTypeBadgeStub = defineComponent({
@@ -84,6 +77,41 @@ describe('Track Detail original and GPX export', () => {
     expect(input.exists()).toBe(true);
     expect(input.element.readOnly).toBe(true);
     expect(input.element.value).toBe('1');
+  });
+
+  it('renders settled fallback metrics when chart points and timestamps are unavailable', () => {
+    const wrapper = mount(TrackDetailOverview, {
+      props: {
+        gpsTrack: {
+          id: 2,
+          trackName: 'Untimed GeoJSON',
+          indexedFile: {
+            id: 8,
+            index: 'GPS',
+            name: 'untimed.geojson',
+            path: 'untimed.geojson',
+            indexerStatus: 'COMPLETED_WITH_SUCCESS',
+          },
+          trackLengthInMeter: 1_440,
+        },
+        trackDetails: [],
+      },
+      global: {
+        directives: { tooltip: {} },
+        stubs: {
+          ActivityTypeBadge: ActivityTypeBadgeStub,
+          Popover: PopoverStub,
+        },
+      },
+    });
+
+    expect(wrapper.find('.skeleton-grid').exists()).toBe(false);
+    const primaryValues = wrapper.findAll('.metrics-primary .metric-tile__value').map((value) => value.text());
+    expect(primaryValues).toHaveLength(4);
+    expect(primaryValues.every(Boolean)).toBe(true);
+    expect(primaryValues[1]).toBe('0m 00s');
+    expect(primaryValues[2]).toMatch(/^0 (m|ft)$/);
+    expect(primaryValues[3]).toMatch(/^0\.0 (km\/h|mph)$/);
   });
 
   it('copies TrackID through the browser clipboard API', async () => {
@@ -161,6 +189,46 @@ describe('Track Detail original and GPX export', () => {
     expect(wrapper.find('button[aria-label="Download original"]').attributes('disabled')).toBeUndefined();
   });
 
+  it('does not carry a pending download into the next track', async () => {
+    let resolveFirstDownload: () => void = () => undefined;
+    let resolveSecondDownload: () => void = () => undefined;
+    mocks.downloadTrackSourceFile
+      .mockReturnValueOnce(new Promise<void>((resolve) => (resolveFirstDownload = resolve)))
+      .mockReturnValueOnce(new Promise<void>((resolve) => (resolveSecondDownload = resolve)));
+    const wrapper = mountOverview('ride.fit');
+
+    await wrapper.find('button[aria-label="Download original"]').trigger('click');
+    await wrapper.setProps({
+      gpsTrack: {
+        ...wrapper.props('gpsTrack'),
+        id: 2,
+        indexedFile: {
+          ...wrapper.props('gpsTrack')?.indexedFile,
+          name: 'sample.igc',
+          path: 'sample.igc',
+        },
+      },
+    });
+
+    expect(wrapper.find('button[aria-label="Download original"]').attributes('disabled')).toBeUndefined();
+    expect(wrapper.find('button[aria-label="Download GPX"]').attributes('disabled')).toBeUndefined();
+
+    await wrapper.find('button[aria-label="Download original"]').trigger('click');
+    await nextTick();
+
+    expect(mocks.downloadTrackSourceFile).toHaveBeenNthCalledWith(2, 2, 'sample.igc');
+
+    resolveFirstDownload();
+    await flushPromises();
+
+    expect(wrapper.find('button[aria-label="Download original"]').attributes('disabled')).toBeDefined();
+
+    resolveSecondDownload();
+    await flushPromises();
+
+    expect(wrapper.find('button[aria-label="Download original"]').attributes('disabled')).toBeUndefined();
+  });
+
   it('shows a toast when GPX export fails', async () => {
     const toastAdd = vi.fn();
     mocks.downloadTrackGpx.mockRejectedValueOnce(new Error('failed'));
@@ -176,44 +244,6 @@ describe('Track Detail original and GPX export', () => {
         summary: 'Download failed',
         detail: 'Could not download GPX.',
       })
-    );
-  });
-
-  it('updates activity type from the overview controls', async () => {
-    mocks.updateTrackActivityType.mockResolvedValueOnce({
-      id: 1,
-      activityType: GpsTrackActivityTypeEnum.Running,
-      indexedFile: { index: 'GPS', name: 'ride.fit', path: 'ride.fit' },
-    });
-    const wrapper = mountOverview('ride.fit');
-
-    await wrapper.find('[data-test="overview-activity-type-select"]').setValue(GpsTrackActivityTypeEnum.Running);
-    await flushPromises();
-
-    expect(mocks.updateTrackActivityType).toHaveBeenCalledWith(1, GpsTrackActivityTypeEnum.Running);
-    expect(wrapper.emitted('track-updated')?.[0]?.[0]).toEqual(expect.objectContaining({ activityType: 'RUNNING' }));
-  });
-
-  it('updates statistics exclusion from the overview controls', async () => {
-    mocks.updateTrackStatisticsExclusion.mockResolvedValueOnce({
-      id: 1,
-      activityType: GpsTrackActivityTypeEnum.Bicycle,
-      statisticsExclusionReason: GpsTrackStatisticsExclusionReasonEnum.WrongActivity,
-      indexedFile: { index: 'GPS', name: 'ride.fit', path: 'ride.fit' },
-    });
-    const wrapper = mountOverview('ride.fit');
-
-    await wrapper
-      .find('[data-test="overview-statistics-exclusion-select"]')
-      .setValue(GpsTrackStatisticsExclusionReasonEnum.WrongActivity);
-    await flushPromises();
-
-    expect(mocks.updateTrackStatisticsExclusion).toHaveBeenCalledWith(1, {
-      highlightExclusionReason: undefined,
-      statisticsExclusionReason: GpsTrackStatisticsExclusionReasonEnum.WrongActivity,
-    });
-    expect(wrapper.emitted('track-updated')?.[0]?.[0]).toEqual(
-      expect.objectContaining({ statisticsExclusionReason: 'WRONG_ACTIVITY' })
     );
   });
 });

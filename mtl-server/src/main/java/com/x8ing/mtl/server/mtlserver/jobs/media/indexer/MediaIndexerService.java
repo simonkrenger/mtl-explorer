@@ -1,11 +1,14 @@
+/* jscpd:ignore-start -- Spring service imports and annotations; indexing behavior is shared. */
 package com.x8ing.mtl.server.mtlserver.jobs.media.indexer;
 
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.x8ing.mtl.server.mtlserver.db.repository.indexer.IndexerRepository;
 import com.x8ing.mtl.server.mtlserver.indexer.FileIndexer;
 import com.x8ing.mtl.server.mtlserver.indexer.FileIndexerImpl;
+import com.x8ing.mtl.server.mtlserver.indexer.IndexerPathMatchers;
+import com.x8ing.mtl.server.mtlserver.indexer.IndexerRescanSupport;
 import com.x8ing.mtl.server.mtlserver.indexer.event.FileIndexerObserver;
-import com.x8ing.mtl.server.mtlserver.indexer.event.OnCompletion;
+import com.x8ing.mtl.server.mtlserver.indexer.event.ProcessingFileIndexerObserver;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -27,11 +30,13 @@ import java.util.List;
         "mediaWatchDirectory",
         "changeDetectionStrategy",
         "liveWatchEnabled",
+        "workerThreads",
         "fileIndexerImpl",
         "indexerRepository",
         "processingWorker",
         "txManager"
 })
+/* jscpd:ignore-end */
 public class MediaIndexerService {
 
     public static final String INDEX_MEDIA = "MEDIA";
@@ -39,11 +44,14 @@ public class MediaIndexerService {
     @Value("${mtl.media-watch-directory}")
     private String mediaWatchDirectory;
 
-    @Value("${mtl.indexer.change-detection-strategy:SIZE_ONLY}")
+    @Value("${mtl.indexer.change-detection-strategy:SIZE_AND_MTIME}")
     private String changeDetectionStrategy;
 
     @Value("${mtl.indexer.media.live-watch-enabled:false}")
     private boolean liveWatchEnabled;
+
+    @Value("${mtl.indexer.worker-threads:2}")
+    private int workerThreads;
 
     private volatile FileIndexerImpl fileIndexerImpl;
 
@@ -66,101 +74,37 @@ public class MediaIndexerService {
     public void findMedia() {
         log.info("Start media indexing");
 
-        FileIndexer fileIndexer = new FileIndexer(txManager);
+        FileIndexer fileIndexer = new FileIndexer(txManager, workerThreads);
         Path mediaWatchDirectoryPath = Paths.get(mediaWatchDirectory);
 
-        // Exclusions: .git and .svn directories, .DS_Store files, @eaDir folders, and hidden files starting with dot
-        PathMatcher gitDir = FileSystems.getDefault().getPathMatcher("regex:(?i).*\\.git(/.*)?");
-        PathMatcher svnDir = FileSystems.getDefault().getPathMatcher("regex:(?i).*\\.svn(/.*)?");
-        PathMatcher dsStore = FileSystems.getDefault().getPathMatcher("regex:.*\\.DS_Store$");
-        PathMatcher eaDir = FileSystems.getDefault().getPathMatcher("regex:.*@eaDir(/.*)?");
-        PathMatcher hiddenFiles = FileSystems.getDefault().getPathMatcher("regex:.*/\\.[^/]+$");
-
-        // Use the worker bean; signal completion back to indexer
-        FileIndexerObserver observer = new FileIndexerObserver() {
-            @Override
-            public void onNewFile(String index, long fileId, OnCompletion completion) {
-                completion.started(fileId);
-                try {
-                    processingWorker.processCreateOrChange(index, fileId, false);
-                    completion.success(fileId);
-                } catch (Throwable t) {
-                    log.error("Media processing failed for new fileId={}: {}", fileId, t.toString(), t);
-                    completion.failed(fileId, safeMsg(t));
-                    if (t instanceof Error) throw (Error) t;
-                }
-            }
-
-            @Override
-            public void onDeletedFile(String index, long fileId, OnCompletion completion) {
-                completion.started(fileId);
-                try {
-                    processingWorker.processDelete(index, fileId);
-                    completion.success(fileId);
-                } catch (Throwable t) {
-                    log.error("Media delete failed for fileId={}: {}", fileId, t.toString(), t);
-                    completion.failed(fileId, safeMsg(t));
-                    if (t instanceof Error) throw (Error) t;
-                }
-            }
-
-            @Override
-            public void onChangedFile(String index, long fileId, OnCompletion completion) {
-                completion.started(fileId);
-                try {
-                    processingWorker.processCreateOrChange(index, fileId, true);
-                    completion.success(fileId);
-                } catch (Throwable t) {
-                    log.error("Media processing failed for changed fileId={}: {}", fileId, t.toString(), t);
-                    completion.failed(fileId, safeMsg(t));
-                    if (t instanceof Error) throw (Error) t;
-                }
-            }
-
-            // Legacy no-arg overloads (not used by indexer now)
-            @Override
-            public void onNewFile(String index, long fileId) {
-            }
-
-            @Override
-            public void onDeletedFile(String index, long fileId) {
-            }
-
-            @Override
-            public void onChangedFile(String index, long fileId) {
-            }
-
-            private String safeMsg(Throwable t) {
-                String s = t.getMessage();
-                return (s == null || s.isBlank()) ? t.getClass().getSimpleName() : s;
-            }
-        };
+        FileIndexerObserver observer = new ProcessingFileIndexerObserver(
+                log, "Media", processingWorker::processCreateOrChange, processingWorker::processDelete);
 
         FileIndexerImpl.ChangeDetectionStrategy strategy =
                 FileIndexerImpl.ChangeDetectionStrategy.valueOf(changeDetectionStrategy);
+        PathMatcher includeMediaFiles = FileSystems.getDefault()
+                .getPathMatcher("regex:" + SupportedMediaFormat.inclusionRegex());
 
         // Start indexing (non-blocking). This constructs a new FileIndexerImpl internally.
-        this.fileIndexerImpl = fileIndexer.findAndIndex(INDEX_MEDIA, mediaWatchDirectoryPath, indexerRepository, observer, false, List.of(gitDir, svnDir, dsStore, eaDir, hiddenFiles), null, strategy, liveWatchEnabled);
+        this.fileIndexerImpl = fileIndexer.findAndIndex(
+                INDEX_MEDIA,
+                mediaWatchDirectoryPath,
+                indexerRepository,
+                observer,
+                false,
+                IndexerPathMatchers.mediaExclusions(),
+                List.of(includeMediaFiles),
+                strategy,
+                liveWatchEnabled);
     }
 
     @Scheduled(fixedDelayString = "${mtl.indexer.media.rescan-interval:P7D}")
     public void scheduledRescan() {
-        if (fileIndexerImpl == null) {
-            log.debug("Scheduled rescan skipped — indexer not yet started for MEDIA");
-            return;
-        }
-        log.info("Scheduled rescan triggered for MEDIA index");
-        fileIndexerImpl.rescan();
+        IndexerRescanSupport.scheduledRescan(fileIndexerImpl, log, INDEX_MEDIA);
     }
 
     public FileIndexerImpl.RescanRequestStatus requestRescan() {
-        FileIndexerImpl indexer = fileIndexerImpl;
-        if (indexer == null) {
-            log.warn("Manual rescan requested before MEDIA indexer startup completed");
-            return FileIndexerImpl.RescanRequestStatus.NOT_RUNNING;
-        }
-        log.info("Manual rescan requested for MEDIA index");
-        return indexer.rescan();
+        return IndexerRescanSupport.requestRescan(fileIndexerImpl, log, INDEX_MEDIA);
     }
 
 }

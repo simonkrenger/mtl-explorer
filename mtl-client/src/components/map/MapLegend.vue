@@ -1,22 +1,39 @@
 <template>
-  <div class="mtl-card">
-    <!-- ── Single header row: [count zone] [| Legende ▾] ── -->
+  <div class="mtl-card" :class="{ 'mtl-card--identified-filter': filterActive && activeFilterIdentity }">
+    <!-- ── Single header row: [count zone] [| map visibility ▾] ── -->
     <div class="mtl-card__header">
       <!-- Left: track count — click opens filter panel -->
-      <div class="mtl-card__count" @click="$emit('chip-click')">
+      <button type="button" class="mtl-card__count" :aria-label="filterButtonAriaLabel" @click="$emit('chip-click')">
         <i v-if="filterActive" class="bi bi-funnel-fill mtl-card__funnel"></i>
-        <span v-if="filterActive">{{ visibleTrackCount }} / {{ totalTrackCount }} Tracks</span>
-        <span v-else>{{ visibleTrackCount }} Tracks</span>
-      </div>
+        <span class="mtl-card__filter-summary">
+          <span
+            v-if="filterActive && activeFilterIdentity"
+            class="mtl-card__filter-identity"
+            :title="activeFilterIdentity"
+            >{{ activeFilterIdentity }}</span
+          >
+          <span class="mtl-card__track-count">{{ trackCountLabel }}</span>
+        </span>
+      </button>
       <!-- Right: legend toggle — only when entries exist -->
-      <div v-if="entries.length > 0" class="mtl-card__legend-toggle" @click="$emit('update:collapsed', !collapsed)">
-        <span class="mtl-card__legend-label">Legend</span>
+      <button
+        v-if="entries.length > 0"
+        type="button"
+        class="mtl-card__legend-toggle"
+        :aria-expanded="!collapsed"
+        @click="$emit('update:collapsed', !collapsed)"
+      >
+        <span class="mtl-card__legend-label">Map visibility</span>
         <i :class="collapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up'" class="mtl-card__chevron"></i>
-      </div>
+      </button>
     </div>
 
     <!-- Legend body — only expand when entries exist -->
     <div v-show="entries.length > 0 && !collapsed" class="mtl-card__body">
+      <div v-if="hiddenGroups.size > 0" class="mtl-card__visibility-actions">
+        <span>{{ hiddenGroups.size }} hidden</span>
+        <button type="button" class="mtl-card__show-all" @click="showAllGroups">Show all</button>
+      </div>
       <div v-if="isGradientLegend" class="mtl-card__gradient">
         <button
           v-for="band in gradientBands"
@@ -41,11 +58,14 @@
         </button>
       </div>
       <div v-else class="mtl-card__scroll">
-        <div
+        <button
           v-for="entry in entries"
           :key="entry.group"
+          type="button"
           class="mtl-card__row"
           :class="{ 'mtl-card__row--disabled': !isGroupVisible(entry.group) }"
+          :aria-pressed="isGroupVisible(entry.group)"
+          :aria-label="`${isGroupVisible(entry.group) ? 'Hide' : 'Show'} ${entry.label ?? entry.group} on map`"
           @click="toggleGroup(entry.group)"
         >
           <span
@@ -55,7 +75,7 @@
           <span class="mtl-card__label" :title="entry.label ?? entry.group">{{ entry.label ?? entry.group }}</span>
           <span class="mtl-card__entry-count">{{ entry.count }}</span>
           <i :class="isGroupVisible(entry.group) ? 'bi bi-eye-fill' : 'bi bi-eye-slash'" class="mtl-card__eye"></i>
-        </div>
+        </button>
       </div>
     </div>
   </div>
@@ -72,9 +92,7 @@ export interface LegendEntry {
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import { parseNumericBucket } from '@/utils/filterMetadata';
-
-const VISIBLE_GRADIENT_LEGEND_ROW_COUNT = 8;
+import { buildNumericGradientBands, colorForNumericBucket, hasOnlyNumericBuckets } from '@/utils/numericGradientBands';
 
 const props = defineProps<{
   entries: LegendEntry[];
@@ -85,6 +103,7 @@ const props = defineProps<{
   visibleTrackCount: number;
   totalTrackCount: number;
   filterActive: boolean;
+  activeFilterIdentity?: string;
   hiddenGroups: Set<string>;
 }>();
 
@@ -107,53 +126,36 @@ type GradientBand = {
   partiallyHidden: boolean;
 };
 
-const entriesByBucket = computed(() => {
-  const result = new Map<number, LegendEntry>();
-  for (const entry of props.entries) {
-    const bucket = parseNumericBucket(entry.group);
-    if (bucket == null) continue;
-    result.set(bucket, entry);
-  }
-  return result;
-});
-
-const allEntriesHaveNumericBuckets = computed(
-  () => props.entries.length > 0 && entriesByBucket.value.size === props.entries.length
+const isGradientLegend = computed(() => props.legendMode === 'gradient' && hasOnlyNumericBuckets(props.entries));
+const trackCountLabel = computed(() =>
+  props.filterActive
+    ? `${props.visibleTrackCount} / ${props.totalTrackCount} Tracks`
+    : `${props.visibleTrackCount} Tracks`
 );
-
-const isGradientLegend = computed(() => props.legendMode === 'gradient' && allEntriesHaveNumericBuckets.value);
+const filterButtonAriaLabel = computed(() => {
+  const identity = props.filterActive ? props.activeFilterIdentity?.trim() : '';
+  return identity ? `Open Filter. ${identity}. ${trackCountLabel.value}` : `Open Filter. ${trackCountLabel.value}`;
+});
 
 const gradientBands = computed<GradientBand[]>(() => {
   const bucketCount = Math.max(1, props.gradientBucketCount ?? 100);
-  const bandCount = Math.min(VISIBLE_GRADIENT_LEGEND_ROW_COUNT, bucketCount);
-  const bands: GradientBand[] = [];
-
-  for (let i = 0; i < bandCount; i += 1) {
-    const start = Math.floor((i * bucketCount) / bandCount);
-    const end = Math.max(start, Math.floor(((i + 1) * bucketCount) / bandCount) - 1);
-    const entries = Array.from(entriesByBucket.value.entries())
-      .filter(([bucket]) => bucket >= start && bucket <= end)
-      .map(([, entry]) => entry);
-    const groups = entries.map((entry) => entry.group);
+  return buildNumericGradientBands(props.entries, bucketCount).map((band) => {
+    const groups = band.entries.map((entry) => entry.group);
     const hiddenCount = groups.filter((group) => props.hiddenGroups.has(group)).length;
     const allHidden = groups.length > 0 && hiddenCount === groups.length;
     const partiallyHidden = hiddenCount > 0 && hiddenCount < groups.length;
-
-    bands.push({
-      key: `${start}-${end}`,
-      start,
-      end,
-      label: `${formatBucket(start, bucketCount)}-${formatBucket(end, bucketCount)}`,
-      title: `${formatBucket(start, bucketCount)}-${formatBucket(end, bucketCount)} percentile range`,
-      count: entries.reduce((sum, entry) => sum + entry.count, 0),
+    return {
+      ...band,
       groups,
-      gradient: `linear-gradient(90deg, ${colorForBucket(start, bucketCount)}, ${colorForBucket(end, bucketCount)})`,
+      gradient: `linear-gradient(90deg, ${colorForNumericBucket(
+        band.start,
+        bucketCount,
+        props.gradientColors ?? []
+      )}, ${colorForNumericBucket(band.end, bucketCount, props.gradientColors ?? [])})`,
       allHidden,
       partiallyHidden,
-    });
-  }
-
-  return bands;
+    };
+  });
 });
 
 function isGroupVisible(group: string): boolean {
@@ -181,18 +183,8 @@ function toggleBand(band: GradientBand) {
   emit('update:hiddenGroups', next);
 }
 
-function colorForBucket(bucket: number, bucketCount: number): string {
-  const colors = props.gradientColors ?? [];
-  if (colors.length === 0) return '#64748b';
-  if (colors.length === 1 || bucketCount <= 1) return colors[0];
-  const maxBucket = bucketCount - 1;
-  const clampedBucket = Math.max(0, Math.min(maxBucket, bucket));
-  const colorIndex = Math.round((clampedBucket / maxBucket) * (colors.length - 1));
-  return colors[colorIndex] ?? colors[colors.length - 1];
-}
-
-function formatBucket(bucket: number, bucketCount: number): string {
-  return String(bucket).padStart(String(Math.max(bucketCount - 1, 0)).length, '0');
+function showAllGroups() {
+  emit('update:hiddenGroups', new Set());
 }
 </script>
 
@@ -211,6 +203,10 @@ function formatBucket(bucket: number, bucketCount: number): string {
   color: var(--chip-text);
   pointer-events: auto;
   letter-spacing: 0.01em;
+}
+
+.mtl-card--identified-filter {
+  max-width: min(360px, calc(100vw - 1.2rem - var(--safe-left, 0px) - var(--safe-right, 0px)));
 }
 
 /* ── Header: single row with two tap zones ── */
@@ -232,6 +228,38 @@ function formatBucket(bucket: number, bucketCount: number): string {
   border-radius: 4px 0 0 4px;
   min-width: 0;
   white-space: nowrap;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.mtl-card__filter-summary {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+}
+
+.mtl-card__filter-identity {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  color: var(--chip-text);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mtl-card__track-count {
+  display: block;
+  opacity: 0.78;
+  font-size: var(--text-2xs-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .mtl-card__count:hover {
@@ -252,10 +280,14 @@ function formatBucket(bucket: number, bucketCount: number): string {
   padding: 0.2rem 0.45rem;
   cursor: pointer;
   user-select: none;
+  border: 0;
   border-left: 1px solid var(--chip-border);
   transition: background 0.15s;
   border-radius: 0 4px 4px 0;
   flex-shrink: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
 }
 
 .mtl-card__legend-toggle:hover {
@@ -276,6 +308,31 @@ function formatBucket(bucket: number, bucketCount: number): string {
 /* ── Legend body ── */
 .mtl-card__body {
   border-top: 1px solid var(--chip-border);
+}
+
+.mtl-card__visibility-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0.65rem 0.15rem;
+  color: var(--text-muted);
+  font-size: var(--text-2xs-size);
+}
+
+.mtl-card__show-all {
+  min-height: 1.5rem;
+  padding: 0.1rem 0.3rem;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mtl-card__show-all:hover {
+  text-decoration: underline;
 }
 
 .mtl-card__scroll {
@@ -358,6 +415,7 @@ function formatBucket(bucket: number, bucketCount: number): string {
 }
 
 .mtl-card__row {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 0.35rem;
@@ -369,6 +427,11 @@ function formatBucket(bucket: number, bucketCount: number): string {
     background 0.15s,
     opacity 0.2s;
   user-select: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 
 .mtl-card__row:hover {

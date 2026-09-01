@@ -1,12 +1,23 @@
 <template>
-  <div class="mini-map-wrapper" :class="{ collapsed: isCollapsed }">
+  <div
+    class="mini-map-wrapper"
+    :class="{ collapsed: isCollapsed }"
+    @mouseleave="clearMapInteraction"
+    @pointerleave="clearMapInteraction"
+  >
     <!-- Collapsed strip: just a thin bar to re-expand -->
     <div v-if="isCollapsed" class="mini-map-collapsed-strip" title="Expand map" @click="toggleCollapse">
       <i class="bi bi-chevron-down"></i>
     </div>
 
     <!-- Map body with floating overlay controls -->
-    <div v-show="!isCollapsed" ref="mapBodyEl" class="mini-map-body" :style="{ height: mapHeight + 'px' }">
+    <div
+      v-show="!isCollapsed"
+      :id="mapBodyId"
+      ref="mapBodyEl"
+      class="mini-map-body"
+      :style="{ height: mapHeight + 'px' }"
+    >
       <div ref="mapEl" class="mini-map-container"></div>
 
       <!-- Floating collapse button overlaid on the map -->
@@ -45,21 +56,38 @@
     </div>
 
     <!-- Bottom-sheet style resize handle -->
-    <div v-show="!isCollapsed" ref="resizeHandleEl" class="resize-handle" title="Drag to resize">
+    <div
+      v-show="!isCollapsed"
+      ref="resizeHandleEl"
+      class="resize-handle"
+      role="separator"
+      tabindex="0"
+      aria-label="Resize activity map"
+      aria-orientation="horizontal"
+      :aria-controls="mapBodyId"
+      :aria-valuemin="MIN_HEIGHT"
+      :aria-valuemax="MAX_HEIGHT"
+      :aria-valuenow="Math.round(mapHeight)"
+      :aria-valuetext="`${Math.round(mapHeight)} pixel map height`"
+      title="Drag, tap, or use arrow keys to resize the map"
+      @click="onResizeHandleClick"
+      @keydown="onResizeHandleKeydown"
+    >
       <span class="resize-grip"></span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { watch, ref, nextTick, onBeforeUnmount, onMounted, markRaw } from 'vue';
-import { usePointerDrag } from '@/composables/usePointerDrag';
-import maplibregl from 'maplibre-gl';
+import { watch, ref, computed, nextTick, onBeforeUnmount, onMounted, markRaw } from 'vue';
+import { useVerticalResizeDrag } from '@/composables/useVerticalResizeDrag';
+import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useTrackMapSync, type TrackPoint } from '@/composables/useTrackMapSync';
 import { useChartSync } from '@/composables/useChartSync';
 import { fetchMapConfig } from '@/utils/mapConfigService';
 import { resolveConfiguredMapStyle } from '@/components/map/mapStyleResolver';
+import { installMissingStyleImageResolver } from '@/utils/maplibreStyleImages';
 import { TRACK_COLOR } from '@/utils/trackColors';
 import {
   TRACK_DETAIL_MINI_MAP_HEIGHT_DEFAULT,
@@ -69,21 +97,42 @@ import {
   useTrackDetailsPreferencesStore,
 } from '@/stores/trackDetailsPreferencesStore';
 import { useMapSettingsStore } from '@/stores/mapSettingsStore';
-import { formatDateAndTimeWithSeconds, formatDistanceSmart, formatDurationSmart, formatNumber } from '@/utils/Utils';
+import {
+  formatDateAndTimeWithSeconds,
+  formatDistanceSmart,
+  formatDurationSmart,
+  formatElevation,
+  formatNumber,
+  formatSpeed,
+} from '@/utils/Utils';
 import type { GpsTrackEvent } from 'x8ing-mtl-api-typescript-fetch/dist/esm/models/index';
 import { unwrapLngLatCoordinates } from '@/components/map/mapGeometry';
 import {
-  clamp01,
   numericRangeForItems,
   projectClickToTrackLine,
   valueAtFraction,
   type TrackLineProjection,
 } from '@/components/map/trackLineHitTest';
+import { createTrackPointPopup, type TrackPointPopupRow } from '@/components/map/trackPointPopup';
+import {
+  formatTrackEventDateTime as eventTimeLabel,
+  trackEventKey as eventKey,
+  trackEventKeysEqual as eventKeysEqual,
+  trackEventTimeMs as eventTimeMs,
+  trackEventTypeLabel as eventTypeLabel,
+} from '@/utils/trackEvents';
+import { VIZ_ORANGE_COLOR, VIZ_ORANGE_STRONG_COLOR } from '@/utils/visualizationColors';
+import type { TrackMediaDto } from '@/repositories/mediaRepository';
+import { resolveMediaPositionMarkerStyle } from '@/components/map/mediaPositionMarkerStyle';
+import { isVideoMedia } from '@/utils/mediaKind';
 
 const MIN_HEIGHT = TRACK_DETAIL_MINI_MAP_HEIGHT_MIN;
 const MAX_HEIGHT = TRACK_DETAIL_MINI_MAP_HEIGHT_MAX;
 const DEFAULT_HEIGHT = TRACK_DETAIL_MINI_MAP_HEIGHT_DEFAULT;
 const DEFAULT_HEIGHT_MOBILE = TRACK_DETAIL_MINI_MAP_HEIGHT_MOBILE_DEFAULT;
+const MINI_MAP_RESIZE_ACTIVATION_THRESHOLD_PX = 0;
+const MINI_MAP_RESIZE_KEYBOARD_STEP_PX = 20;
+const MINI_MAP_RESIZE_PRESET_TOLERANCE_PX = 1;
 
 const SOURCE_ID = 'detail-track';
 const TRACK_LAYER = 'detail-track-layer';
@@ -98,14 +147,16 @@ const EVENT_ICON_DIAMOND_SIZE = 13;
 const EVENT_ICON_CORNER_RADIUS = 2.5;
 const EVENT_ICON_STROKE_WIDTH = 1;
 const DEFAULT_DEVICE_PIXEL_RATIO = 1;
-const STOP_EVENT_MARKER_FILL = '#f97316';
+const STOP_EVENT_MARKER_FILL = VIZ_ORANGE_COLOR;
 const STOP_EVENT_MARKER_STROKE = '#7c2d12';
-const SELECTED_EVENT_HALO_COLOR = '#f97316';
+const SELECTED_EVENT_HALO_COLOR = STOP_EVENT_MARKER_FILL;
 const SELECTED_EVENT_CORE_COLOR = '#fff7ed';
-const SELECTED_EVENT_CORE_STROKE = '#ea580c';
+const SELECTED_EVENT_CORE_STROKE = VIZ_ORANGE_STRONG_COLOR;
 const METERS_PER_KILOMETER = 1000;
 const SEGMENT_CLICK_TOLERANCE_PX = 12;
 const SEGMENT_CLICK_TOLERANCE_METERS = 120;
+const TRACK_FIT_BOUNDS_PADDING_PX = 20;
+const TRACK_FIT_BOUNDS_DURATION_MS = 0;
 // Hover snap tolerance expressed in screen pixels. Converting this to meters at the
 // current zoom keeps snapping equally forgiving whether zoomed in or out (a fixed
 // metric radius becomes sub-pixel when zoomed out, so the cursor would almost never
@@ -117,6 +168,7 @@ const MERCATOR_METERS_PER_PIXEL_Z0 = 156543.03392804097;
 const HOVER_MARKER_DIAMETER_PX = 14;
 const HOVER_MARKER_FILL = '#e63946';
 const HOVER_MARKER_STROKE = '#fff';
+const PHOTO_MARKER_BORDER_RADIUS = '999px';
 type EventFeatureProperties = {
   duration?: string;
   eventKey?: string | number;
@@ -145,18 +197,28 @@ const props = withDefaults(
     gpsTrackId: number;
     replayEnabled?: boolean;
     trackEvents?: GpsTrackEvent[];
+    trackMedia?: TrackMediaDto[];
     trackCoordinates?: number[][];
+    mediaInteractionEnabled?: boolean;
     selectedEventKey?: string | number | null;
+    selectedMediaId?: number | null;
+    highlightedMediaId?: number | null;
   }>(),
   {
     trackEvents: () => [],
+    trackMedia: () => [],
     trackCoordinates: () => [],
+    mediaInteractionEnabled: false,
     selectedEventKey: null,
+    selectedMediaId: null,
+    highlightedMediaId: null,
   }
 );
 
 const emit = defineEmits<{
   'select-event': [key: string | number | null];
+  'select-media': [mediaId: number];
+  'clear-selection': [];
   'start-3d-replay': [];
 }>();
 
@@ -166,11 +228,14 @@ const isCollapsed = ref(false);
 const preferencesStore = useTrackDetailsPreferencesStore();
 const mapSettingsStore = useMapSettingsStore();
 const mapHeight = ref(preferencesStore.ensureMiniMapHeight(isMobile() ? DEFAULT_HEIGHT_MOBILE : DEFAULT_HEIGHT));
+const mapBodyId = computed(() => `track-detail-mini-map-${props.gpsTrackId}`);
 const showEvents = ref(props.trackEvents.length > 0);
 
 let map: maplibregl.Map | null = null;
 let mapReady = false;
 let hoverMarker: maplibregl.Marker | null = null;
+let photoMarkers: maplibregl.Marker[] = [];
+const photoMarkerElements = new Map<number, HTMLButtonElement>();
 
 let eventLayerRetryScheduled = false;
 let eventLayerRetryMap: maplibregl.Map | null = null;
@@ -185,19 +250,76 @@ let canvasLeaveHandler: (() => void) | null = null;
 const resizeHandleEl = ref<HTMLElement | null>(null);
 let resizeStartHeight = 0;
 
-usePointerDrag(resizeHandleEl, ({ movement: [, my], dragging, first, last }) => {
-  if (first) {
-    resizeStartHeight = mapHeight.value;
+function clampMapHeight(height: number): number {
+  return Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, height));
+}
+
+function beginMiniMapResize(): void {
+  resizeStartHeight = mapHeight.value;
+}
+
+function updateMiniMapResize(deltaY: number): void {
+  mapHeight.value = clampMapHeight(resizeStartHeight + deltaY);
+  // Keep the container and MapLibre canvas in the same pointer-move update.
+  // Deferring or throttling this resize makes touch dragging visibly lag.
+  map?.resize();
+}
+
+function commitMiniMapResize(): void {
+  mapHeight.value = preferencesStore.setMiniMapHeight(mapHeight.value);
+  nextTick(() => map?.resize());
+}
+
+function setMiniMapHeight(height: number): void {
+  mapHeight.value = preferencesStore.setMiniMapHeight(clampMapHeight(height));
+  nextTick(() => map?.resize());
+}
+
+function cycleMiniMapHeight(): void {
+  const defaultHeight = isMobile() ? DEFAULT_HEIGHT_MOBILE : DEFAULT_HEIGHT;
+  const presets = [MIN_HEIGHT, defaultHeight, MAX_HEIGHT];
+  const nextHeight = presets.find((height) => height > mapHeight.value + MINI_MAP_RESIZE_PRESET_TOLERANCE_PX);
+  setMiniMapHeight(nextHeight ?? presets[0]);
+}
+
+function onResizeHandleClick(event: MouseEvent): void {
+  if (consumeResizeHandleClickAfterDrag(event)) return;
+  cycleMiniMapHeight();
+}
+
+function onResizeHandleKeydown(event: KeyboardEvent): void {
+  let nextHeight: number | null = null;
+  if (event.key === 'ArrowUp') nextHeight = mapHeight.value - MINI_MAP_RESIZE_KEYBOARD_STEP_PX;
+  else if (event.key === 'ArrowDown') nextHeight = mapHeight.value + MINI_MAP_RESIZE_KEYBOARD_STEP_PX;
+  else if (event.key === 'Home') nextHeight = MIN_HEIGHT;
+  else if (event.key === 'End') nextHeight = MAX_HEIGHT;
+  else if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    cycleMiniMapHeight();
+    return;
   }
-  if (dragging) {
-    const newH = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, resizeStartHeight + my));
-    mapHeight.value = newH;
-    map?.resize();
+
+  if (nextHeight == null) return;
+  event.preventDefault();
+  setMiniMapHeight(nextHeight);
+}
+
+const { consumeClickAfterDrag: consumeResizeHandleClickAfterDrag } = useVerticalResizeDrag(
+  resizeHandleEl,
+  {
+    onStart: beginMiniMapResize,
+    onResize: updateMiniMapResize,
+    onEnd: commitMiniMapResize,
+  },
+  {
+    activationThresholdPx: MINI_MAP_RESIZE_ACTIVATION_THRESHOLD_PX,
   }
-  if (last) {
-    mapHeight.value = preferencesStore.setMiniMapHeight(mapHeight.value);
-    nextTick(() => map?.resize());
-  }
+);
+
+defineExpose({
+  beginMiniMapResize,
+  updateMiniMapResize,
+  commitMiniMapResize,
 });
 
 // ── Map init ──────────────────────────────────────────────────────────────
@@ -240,16 +362,11 @@ async function initMap() {
     })
   );
 
-  // Silently replace any missing sprite icons with a transparent 1×1 placeholder
-  map.on('styleimagemissing', (e: { id: string }) => {
-    if (!map!.hasImage(e.id)) {
-      map!.addImage(e.id, { width: 1, height: 1, data: new Uint8ClampedArray(4) });
-    }
-  });
+  installMissingStyleImageResolver(map);
 
   await new Promise<void>((resolve) => {
     if (map!.loaded()) resolve();
-    else map!.on('load', resolve);
+    else map!.on('load', () => resolve());
   });
   mapReady = true;
 
@@ -259,6 +376,7 @@ async function initMap() {
 
   drawEvents();
   drawTrack();
+  drawPhotoMarkers();
 
   // Restore any point that was set while the map was initializing.
   updateMarker(pinnedPoint.value ?? hoverPoint.value);
@@ -266,33 +384,28 @@ async function initMap() {
 
   map.on('click', (e: maplibregl.MapMouseEvent) => {
     if (clickedEventFeature(e)) return;
-    const target = findClickPointTarget(e);
-    if (target) {
-      setPinnedPoint(target.point);
-      showChartsAtPoint(target.point);
-      showPointPopup(target.point, target.anchor);
+    if (!props.mediaInteractionEnabled) {
+      const target = findClickPointTarget(e);
+      if (target) {
+        setPinnedPoint(target.point);
+        showChartsAtPoint(target.point);
+        showPointPopup(target.point, target.anchor);
+        return;
+      }
     }
+    clearMapSelection();
   });
 
   map.on('mousemove', (e: maplibregl.MapMouseEvent) => {
+    if (props.mediaInteractionEnabled) return;
     scheduleMapHover(e.lngLat.lat, e.lngLat.lng);
   });
-
-  const clearMapInteraction = () => {
-    cancelMapHover();
-    lastSyncedHoverPointIndex = null;
-    clearHover();
-    clearChartCrosshairs();
-  };
 
   map.on('mouseout', clearMapInteraction);
   canvasLeaveHandler = clearMapInteraction;
   map.getCanvas().addEventListener('mouseleave', clearMapInteraction);
 
-  map.on('dblclick', () => {
-    setPinnedPoint(null);
-    clearPointPopup();
-  });
+  map.on('dblclick', clearMapSelection);
 
   const onEventFeatureClick = (e: maplibregl.MapLayerMouseEvent) => {
     const feature = e.features?.[0];
@@ -341,13 +454,114 @@ function clearPointPopup() {
   }
 }
 
+function clearMapSelection() {
+  setPinnedPoint(null);
+  clearMapInteraction();
+  clearPointPopup();
+  emit('select-event', null);
+  emit('clear-selection');
+}
+
+function clearPhotoMarkers() {
+  for (const marker of photoMarkers) marker.remove();
+  photoMarkers = [];
+  photoMarkerElements.clear();
+}
+
+function drawPhotoMarkers() {
+  clearPhotoMarkers();
+  if (!map || !mapReady) return;
+
+  for (const item of props.trackMedia) {
+    const coordinates = trackMediaCoordinates(item);
+    if (!coordinates) continue;
+    const label = trackMediaMarkerLabel(item);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = ['mini-map-photo-marker', trackMediaMarkerClass(item)].filter(Boolean).join(' ');
+    button.dataset.mediaId = String(item.id);
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    const markerStyle = resolveMediaPositionMarkerStyle(item.positionOrigin, item.estimatedPosition);
+    button.style.setProperty('--media-marker-fill', markerStyle.fill);
+    button.style.setProperty('--media-marker-color', markerStyle.foreground);
+    button.style.setProperty('--media-marker-border', markerStyle.border);
+    button.style.setProperty('--media-marker-border-radius', PHOTO_MARKER_BORDER_RADIUS);
+    const icon = document.createElement('i');
+    icon.className = isVideoMedia(item.fileName, item.mediaKind) ? 'bi bi-camera-video-fill' : 'bi bi-camera-fill';
+    icon.setAttribute('aria-hidden', 'true');
+    button.append(icon);
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!props.mediaInteractionEnabled) return;
+      emit('select-media', item.id);
+    });
+    photoMarkerElements.set(item.id, button);
+    photoMarkers.push(new maplibregl.Marker({ element: button }).setLngLat(coordinates).addTo(map));
+  }
+  syncPhotoMarkerInteractivity();
+  syncPhotoMarkerStates();
+}
+
+function syncPhotoMarkerInteractivity() {
+  for (const element of photoMarkerElements.values()) {
+    element.disabled = !props.mediaInteractionEnabled;
+    element.classList.toggle('mini-map-photo-marker--interactive', props.mediaInteractionEnabled);
+  }
+}
+
+function syncPhotoMarkerStates() {
+  for (const [mediaId, element] of photoMarkerElements) {
+    element.classList.toggle('mini-map-photo-marker--selected', mediaId === props.selectedMediaId);
+    element.classList.toggle('mini-map-photo-marker--highlighted', mediaId === props.highlightedMediaId);
+  }
+}
+
+function trackMediaCoordinates(item: TrackMediaDto): [number, number] | null {
+  const usesExifPosition = item.positionOrigin === 'EXIF_EMBEDDED';
+  const lat =
+    item.resolvedLat ?? item.manualLat ?? (usesExifPosition ? item.originalLat : (item.routeLat ?? item.originalLat));
+  const lng =
+    item.resolvedLng ?? item.manualLng ?? (usesExifPosition ? item.originalLng : (item.routeLng ?? item.originalLng));
+  if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return [lng, lat];
+}
+
+function trackMediaMarkerClass(item: TrackMediaDto): string {
+  if (item.positionOrigin === 'USER_ASSIGNED') return 'mini-map-photo-marker--manual';
+  if (item.positionOrigin === 'TRACK_INTERPOLATED' || item.estimatedPosition) {
+    return 'mini-map-photo-marker--estimated';
+  }
+  if (item.positionOrigin === 'EXIF_EMBEDDED') return 'mini-map-photo-marker--gps';
+  return 'mini-map-photo-marker--unknown';
+}
+
+function trackMediaMarkerLabel(item: TrackMediaDto): string {
+  const name = item.fileName?.trim() || `Media ${item.id}`;
+  const source =
+    item.positionOrigin === 'USER_ASSIGNED'
+      ? 'Location set by you'
+      : item.positionOrigin === 'TRACK_INTERPOLATED' || item.estimatedPosition
+        ? `Estimated from ${isVideoMedia(item.fileName, item.mediaKind) ? 'video' : 'photo'} time and activity track`
+        : item.positionOrigin === 'EXIF_EMBEDDED'
+          ? isVideoMedia(item.fileName, item.mediaKind)
+            ? 'Video GPS'
+            : 'Photo GPS'
+          : 'Position source unknown';
+  return `${name}. ${source}${item.ambiguousMatch ? '. Multiple activities matched' : ''}`;
+}
+
 function showPointPopup(point: TrackPoint, anchor: [number, number] = [point.lng, point.lat]) {
   if (!map) return;
   clearPointPopup();
-  pointPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' })
-    .setLngLat(anchor)
-    .setHTML(pointPopupHtml(point))
-    .addTo(map);
+  pointPopup = createTrackPointPopup({
+    map,
+    lngLat: anchor,
+    title: 'Track point',
+    rows: pointPopupRows(point),
+    closeOnClick: true,
+  });
 }
 
 function findClickPointTarget(e: maplibregl.MapMouseEvent): ClickPointTarget | null {
@@ -409,27 +623,15 @@ function findPointForTrackFraction(fraction: number): TrackPoint | null {
   return points[0] ?? null;
 }
 
-function pointPopupHtml(point: TrackPoint): string {
-  const rows = [
-    ['Point', formatNumber(displayPointIndex(point) + 1, 0)],
-    ['Time', formatPointTime(point.timestamp)],
-    ['Distance', formatDistanceSmart(point.distanceKm * METERS_PER_KILOMETER)],
-    ['Elevation', point.altitude == null ? '—' : `${formatNumber(point.altitude, 1)} m`],
-    ['Speed', formatPointSpeed(point)],
-    ['Elapsed', formatElapsed(point)],
+function pointPopupRows(point: TrackPoint): TrackPointPopupRow[] {
+  return [
+    { label: 'Point', value: formatNumber(displayPointIndex(point) + 1, 0) },
+    { label: 'Time', value: formatPointTime(point.timestamp) },
+    { label: 'Distance', value: formatDistanceSmart(point.distanceKm * METERS_PER_KILOMETER) },
+    { label: 'Elevation', value: point.altitude == null ? '—' : formatElevation(point.altitude, 1) },
+    { label: 'Speed', value: formatPointSpeed(point) },
+    { label: 'Elapsed', value: formatElapsed(point) },
   ];
-  return `
-    <div class="detail-point-popup">
-      <strong>Track point</strong>
-      <table>
-        ${rows
-          .map(
-            ([label, value]) =>
-              `<tr><td class="detail-point-popup__label">${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`
-          )
-          .join('')}
-      </table>
-    </div>`;
 }
 
 function formatPointTime(timestamp: number): string {
@@ -458,7 +660,7 @@ function formatPointSpeed(point: TrackPoint): string {
   const dtMs = b.timestamp - a.timestamp;
   const dKm = b.distanceKm - a.distanceKm;
   if (!Number.isFinite(dtMs) || dtMs <= 0 || !Number.isFinite(dKm) || dKm < 0) return '—';
-  return `${formatNumber(dKm / (dtMs / 3_600_000), 1)} km/h`;
+  return formatSpeed(dKm / (dtMs / 3_600_000), 1);
 }
 
 function sameTrackPoint(a: TrackPoint, b: TrackPoint): boolean {
@@ -506,7 +708,7 @@ function drawTrack() {
     (b, c) => b.extend(c as [number, number]),
     new maplibregl.LngLatBounds(coordinates[0], coordinates[0])
   );
-  map.fitBounds(bounds, { padding: 20 });
+  map.fitBounds(bounds, { padding: TRACK_FIT_BOUNDS_PADDING_PX, duration: TRACK_FIT_BOUNDS_DURATION_MS });
 
   // The hover marker is a DOM overlay (maplibregl.Marker) and always renders on top
   // of the canvas, so it no longer needs explicit layer reordering after drawTrack().
@@ -560,7 +762,10 @@ function currentHoverSnapMeters(lat: number): number {
 
 function syncMapHover(lat: number, lng: number) {
   const pt = findPointByLatLng(lat, lng, currentHoverSnapMeters(lat));
-  if (!pt) return;
+  if (!pt) {
+    clearMapHoverArtifacts();
+    return;
+  }
   if (lastSyncedHoverPointIndex === pt.pointIndex) return;
 
   lastSyncedHoverPointIndex = pt.pointIndex;
@@ -568,7 +773,19 @@ function syncMapHover(lat: number, lng: number) {
   showChartsAtPoint(pt);
 }
 
+function clearMapHoverArtifacts() {
+  lastSyncedHoverPointIndex = null;
+  clearHover();
+  clearChartCrosshairs();
+}
+
+function clearMapInteraction() {
+  cancelMapHover();
+  clearMapHoverArtifacts();
+}
+
 function scheduleMapHover(lat: number, lng: number) {
+  if (props.mediaInteractionEnabled) return;
   pendingMapHover = { lat, lng };
   if (mapHoverFrame !== null) return;
 
@@ -580,21 +797,6 @@ function scheduleMapHover(lat: number, lng: number) {
       syncMapHover(nextHover.lat, nextHover.lng);
     }
   });
-}
-
-function eventKey(event: GpsTrackEvent): string | number {
-  return event.id ?? `${event.startPointIndex ?? 'x'}-${eventTimeMs(event.startTimestamp)}`;
-}
-
-function eventKeysEqual(a: string | number | null | undefined, b: string | number | null | undefined): boolean {
-  return a != null && b != null && String(a) === String(b);
-}
-
-function eventTimeMs(value: GpsTrackEvent['startTimestamp']): number {
-  if (!value) return 0;
-  const date = typeof value === 'string' ? new Date(value) : (value as Date);
-  const time = date.getTime();
-  return Number.isFinite(time) ? time : 0;
 }
 
 function eventPoint(event: GpsTrackEvent): [number, number] | null {
@@ -677,24 +879,6 @@ function pointToLngLat(point: unknown): [number, number] | null {
   const lng = Number(p.x);
   const lat = Number(p.y);
   return Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : null;
-}
-
-function eventTypeLabel(value: string | undefined): string {
-  if (!value) return 'Event';
-  return value
-    .toLowerCase()
-    .replaceAll('_', ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function eventTimeLabel(value: GpsTrackEvent['startTimestamp']): string {
-  if (!value) return '';
-  const date = typeof value === 'string' ? new Date(value) : (value as Date);
-  if (!Number.isFinite(date.getTime())) return '';
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(date);
 }
 
 function eventDurationLabel(seconds: number | undefined): string {
@@ -961,7 +1145,7 @@ function updateMarker(point: TrackPoint | null) {
   // whole large track is in view) and was the real cause of the sluggish scrub.
   if (!map) return;
 
-  if (!point) {
+  if (props.mediaInteractionEnabled || !point) {
     hoverMarker?.remove();
     return;
   }
@@ -993,7 +1177,7 @@ function toggleCollapse() {
           (b, c) => b.extend(c as [number, number]),
           new maplibregl.LngLatBounds(coordinates[0], coordinates[0])
         );
-        map?.fitBounds(bounds, { padding: 20 });
+        map?.fitBounds(bounds, { padding: TRACK_FIT_BOUNDS_PADDING_PX, duration: TRACK_FIT_BOUNDS_DURATION_MS });
       }
     });
   }
@@ -1005,7 +1189,19 @@ const mountMap = () => {
   });
 };
 
+function isTrackHoverSurface(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(mapBodyEl.value?.contains(target) || target.closest('.highcharts-container'));
+}
+
+function clearMapInteractionOutsideSurfaces(event: MouseEvent | PointerEvent) {
+  if (isTrackHoverSurface(event.target)) return;
+  clearMapInteraction();
+}
+
 onBeforeUnmount(() => {
+  document.removeEventListener('mousemove', clearMapInteractionOutsideSurfaces, true);
+  document.removeEventListener('pointermove', clearMapInteractionOutsideSurfaces, true);
   clearEventLayerRetry();
   cancelMapHover();
   clearPointPopup();
@@ -1017,6 +1213,7 @@ onBeforeUnmount(() => {
     hoverMarker.remove();
     hoverMarker = null;
   }
+  clearPhotoMarkers();
   if (map) {
     map.remove();
     map = null;
@@ -1040,6 +1237,34 @@ watch(
     drawEvents();
   },
   { deep: true }
+);
+
+watch(
+  () => props.trackMedia,
+  () => drawPhotoMarkers(),
+  { deep: true }
+);
+
+watch(
+  () => props.mediaInteractionEnabled,
+  (enabled) => {
+    syncPhotoMarkerInteractivity();
+    if (enabled) {
+      clearMapInteraction();
+      clearPointPopup();
+    }
+    updateMarker(enabled ? null : (hoverPoint.value ?? pinnedPoint.value));
+  }
+);
+
+watch(
+  () => props.selectedMediaId,
+  () => syncPhotoMarkerStates()
+);
+
+watch(
+  () => props.highlightedMediaId,
+  () => syncPhotoMarkerStates()
 );
 
 watch(
@@ -1072,6 +1297,8 @@ watch(
 );
 
 onMounted(() => {
+  document.addEventListener('mousemove', clearMapInteractionOutsideSurfaces, true);
+  document.addEventListener('pointermove', clearMapInteractionOutsideSurfaces, true);
   mountMap();
 });
 
@@ -1212,6 +1439,54 @@ watch(
   min-height: 0;
 }
 
+:global(.mini-map-photo-marker) {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--media-marker-color);
+  background: var(--media-marker-fill);
+  border: 3px solid var(--media-marker-border);
+  border-radius: var(--media-marker-border-radius);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.34);
+  cursor: default;
+  font-size: 0.8rem;
+  transition:
+    box-shadow 140ms ease,
+    filter 140ms ease,
+    outline-color 140ms ease;
+}
+
+:global(.mini-map-photo-marker--interactive) {
+  cursor: pointer;
+}
+
+:global(.mini-map-photo-marker--selected) {
+  outline: 4px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 3px;
+  z-index: 2;
+}
+
+:global(.mini-map-photo-marker--highlighted) {
+  outline: 4px solid color-mix(in srgb, var(--accent) 82%, white);
+  outline-offset: 4px;
+  box-shadow:
+    0 0 0 9px color-mix(in srgb, var(--accent) 20%, transparent),
+    0 6px 18px rgba(15, 23, 42, 0.45);
+  filter: brightness(1.08);
+  z-index: 3;
+}
+
+:global(.mini-map-photo-marker--highlighted i) {
+  transform: scale(1.15);
+}
+
+:global(.mini-map-photo-marker:focus-visible) {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
 /* ── Resize handle (bottom-sheet style) ── */
 .resize-handle {
   flex: 0 0 auto;
@@ -1223,6 +1498,11 @@ watch(
   background: transparent;
   user-select: none;
   touch-action: none;
+}
+
+.resize-handle:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: -2px;
 }
 
 .resize-grip {
@@ -1239,29 +1519,5 @@ watch(
 .resize-handle:active .resize-grip {
   width: 48px;
   background: var(--text-faint);
-}
-
-.mini-map-wrapper :deep(.detail-point-popup) {
-  font-size: var(--text-xs-size);
-  color: var(--text-primary);
-}
-
-.mini-map-wrapper :deep(.detail-point-popup strong) {
-  display: block;
-  margin-bottom: 0.35rem;
-}
-
-.mini-map-wrapper :deep(.detail-point-popup table) {
-  border-collapse: collapse;
-}
-
-.mini-map-wrapper :deep(.detail-point-popup td) {
-  padding: 0.08rem 0.35rem 0.08rem 0;
-  white-space: nowrap;
-}
-
-.mini-map-wrapper :deep(.detail-point-popup__label) {
-  color: var(--text-muted);
-  font-weight: 600;
 }
 </style>
